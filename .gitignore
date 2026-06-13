@@ -1,0 +1,8 @@
+# Bronmateriaal (auteursrechtelijk boek) — niet publiceren
+rinmi.epub
+# Lokale Claude-/editorbestanden
+.claude/
+# Test- en systeembestanden
+__pycache__/
+*.pyc
+.DS_Store

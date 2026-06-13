@@ -1,0 +1,2828 @@
+<!DOCTYPE html>
+<html lang="nl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="Rinmi">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="theme-color" content="#0a0d16">
+<meta name="description" content="Rinmi — De Kalme Oceaan: een avonturengame gebaseerd op het boek van Victoria Vermoolen.">
+<title>Rinmi — De Kalme Oceaan</title>
+<style>
+  *{ -webkit-tap-highlight-color:transparent; box-sizing:border-box; }
+  html,body{ margin:0; padding:0; height:100%; width:100%; position:fixed; overflow:hidden;
+    background:#07090f; color:#fff; overscroll-behavior:none; touch-action:none;
+    -webkit-user-select:none; user-select:none; -webkit-touch-callout:none;
+    font-family:'Trebuchet MS','Segoe UI',Verdana,sans-serif; }
+  #wrap{ position:fixed; inset:0; display:flex; align-items:center; justify-content:center;
+    background:radial-gradient(120% 120% at 50% 0%, #1a2a4e 0%, #0a0d16 70%, #07090f 100%); }
+  canvas#game{ display:block; touch-action:none;
+    aspect-ratio:16/9; max-width:100vw; max-height:100vh;
+    width:min(100vw, calc(100dvh*16/9)); height:auto;
+    image-rendering:auto; border-radius:6px;
+    box-shadow:0 10px 50px rgba(0,0,0,0.6), 0 0 0 1px rgba(255,255,255,0.06); }
+  #rotate{ display:none; position:fixed; inset:0; z-index:10;
+    background:linear-gradient(160deg,#1a2a4e,#0a0d16); color:#cfe6ff;
+    align-items:center; justify-content:center; text-align:center; padding:24px;
+    flex-direction:column; font-size:18px; line-height:1.5; }
+  #rotate .ph{ font-size:54px; margin-bottom:14px; animation:tw 1.8s ease-in-out infinite; }
+  @keyframes tw{ 0%,40%{ transform:rotate(0) } 70%,100%{ transform:rotate(90deg) } }
+  @media (orientation:portrait) and (pointer:coarse){
+    #wrap{ display:none; } #rotate{ display:flex; }
+  }
+</style>
+</head>
+<body>
+<div id="wrap"><canvas id="game" width="960" height="540"></canvas></div>
+<div id="rotate"><div class="ph">📱↻</div><b>Draai je toestel</b>
+  <div style="opacity:.85;font-size:14px;margin-top:8px">Rinmi speelt het lekkerst liggend.<br>Draai je iPhone een kwartslag. 🌊</div></div>
+<script>
+"use strict";
+/* ============================================================
+   RINMI — De Kalme Oceaan
+   Een platformer met RPG-elementen, gebaseerd op het verhaal
+   "Rinmi" van Victoria Vermoolen.
+   ============================================================ */
+
+const cv = document.getElementById('game');
+const cx = cv.getContext('2d');
+cx.imageSmoothingEnabled = true;
+const W = 960, H = 540, TILE = 32, ROWS = 17;
+const GRAV = 0.55, JUMP = -12.6;
+function clamp(v,a,b){ return v<a?a:(v>b?b:v); }
+function lerp(a,b,t){ return a+(b-a)*t; }
+
+/* ---------------- Audio (kleine piepjes) ---------------- */
+let actx = null;
+function audio(){ if(!actx){ try{ actx = new (window.AudioContext||window.webkitAudioContext)(); }catch(e){} } return actx; }
+function beep(freq, dur, type, vol, slide){
+  const a = audio(); if(!a) return;
+  try{
+    const o = a.createOscillator(), g = a.createGain();
+    o.type = type||'square'; o.frequency.value = freq;
+    if(slide) o.frequency.linearRampToValueAtTime(slide, a.currentTime+dur);
+    g.gain.value = vol||0.05;
+    g.gain.exponentialRampToValueAtTime(0.0001, a.currentTime+dur);
+    o.connect(g); g.connect(a.destination);
+    o.start(); o.stop(a.currentTime+dur);
+  }catch(e){}
+}
+const SFX = {
+  munt:   ()=>beep(990,0.09,'square',0.04,1320),
+  spring: ()=>beep(330,0.12,'triangle',0.05,520),
+  slag:   ()=>beep(200,0.08,'sawtooth',0.04,120),
+  raak:   ()=>beep(150,0.15,'sawtooth',0.05,80),
+  au:     ()=>beep(180,0.2,'square',0.06,90),
+  eet:    ()=>beep(520,0.1,'sine',0.06,650),
+  gave:   ()=>beep(700,0.2,'sine',0.05,1100),
+  poef:   ()=>beep(260,0.18,'triangle',0.05,60),
+  open:   ()=>beep(440,0.25,'sine',0.05,880),
+  niveau: ()=>{beep(523,0.1,'square',0.05);setTimeout(()=>beep(659,0.1,'square',0.05),110);setTimeout(()=>beep(784,0.18,'square',0.05),220);},
+  koop:   ()=>beep(660,0.12,'sine',0.05,880),
+  fout:   ()=>beep(140,0.2,'square',0.05,100),
+  boss:   ()=>beep(90,0.5,'sawtooth',0.07,60),
+};
+
+/* ---------------- Input: toetsenbord ---------------- */
+const keysDown = {};
+let keysHit = {};
+window.addEventListener('keydown', e=>{
+  audio();
+  const k = e.key.toLowerCase();
+  if([' ','arrowup','arrowdown','arrowleft','arrowright','tab'].includes(k)) e.preventDefault();
+  if(!e.repeat) keysHit[k] = true;
+  keysDown[k] = true;
+});
+window.addEventListener('keyup', e=>{ keysDown[e.key.toLowerCase()] = false; });
+
+/* ---------------- Input: touch (native gebaren) ----------------
+   Linkerhelft  = zwevende joystick (lopen, en omhoog/omlaag voor zwemmen).
+   Rechterhelft = gebaren: tik = aanval, veeg omhoog = springen (vasthouden = zweven),
+                  veeg omlaag = je gave. Plus een paar grote HUD-knoppen.
+------------------------------------------------------------------ */
+const isTouch = ('ontouchstart' in window) || navigator.maxTouchPoints>0;
+let uiButtons = [];     // menuknoppen (per scherm opnieuw gevuld)
+let hudButtons = [];    // HUD-knoppen tijdens het spelen
+const T = {
+  joyId:null, baseX:0, baseY:0, curX:0, curY:0, axisX:0, up:false, down:false, active:false,
+  rightId:null, rStartX:0, rStartY:0, rX:0, rY:0, rStartT:0, jumpHeld:false, swiped:false,
+  hits:{}, ripples:[], hintGezien: localStorage.getItem('rinmi_touchhint')==='1',
+};
+function touchDownKey(k){
+  if(k==='arrowleft'||k==='a') return T.axisX<0;
+  if(k==='arrowright'||k==='d') return T.axisX>0;
+  if(k==='arrowup'||k==='w'||k===' ') return T.jumpHeld || T.up;
+  if(k==='arrowdown') return T.down;
+  return false;
+}
+function hit(...ks){ return ks.some(k=>keysHit[k] || T.hits[k]); }
+function down(...ks){ return ks.some(k=>keysDown[k] || touchDownKey(k)); }
+function emitHit(k){ T.hits[k]=true; }
+
+function canvasPos(t){
+  const r = cv.getBoundingClientRect();
+  return { x:(t.clientX-r.left)*(W/r.width), y:(t.clientY-r.top)*(H/r.height) };
+}
+function uiTapAt(x,y){
+  for(const b of uiButtons){ if(x>=b.x&&x<=b.x+b.w&&y>=b.y&&y<=b.y+b.h){ b.fn(); return true; } }
+  return false;
+}
+function hudTapAt(x,y){
+  for(const b of hudButtons){ if(x>=b.x&&x<=b.x+b.w&&y>=b.y&&y<=b.y+b.h){ b.fn(); return true; } }
+  return false;
+}
+const PLAYSTATES = { play:1, ride:1 };
+function startTouch(id,x,y){
+  if(PLAYSTATES[game.state]){
+    if(!T.hintGezien){ T.hintGezien=true; localStorage.setItem('rinmi_touchhint','1'); }
+    if(hudTapAt(x,y)) return;                 // gave / pauze / inventaris / wapen
+    if(x < W*0.46 && T.joyId===null){         // linkerzone → joystick
+      T.joyId=id; T.baseX=x; T.baseY=y; T.curX=x; T.curY=y; T.axisX=0; T.up=false; T.down=false; T.active=true;
+    } else if(T.rightId===null){              // rechterzone → gebaren
+      T.rightId=id; T.rStartX=x; T.rStartY=y; T.rX=x; T.rY=y; T.rStartT=game.tijd; T.swiped=false;
+    }
+  } else {
+    uiTapAt(x,y);                             // menu's: meteen knop raken
+  }
+}
+function moveTouch(id,x,y){
+  if(id===T.joyId){
+    T.curX=x; T.curY=y;
+    const dx=x-T.baseX, dy=y-T.baseY;
+    T.axisX = dx<-11 ? -1 : (dx>11 ? 1 : 0);
+    T.up = dy<-18; T.down = dy>18;
+  } else if(id===T.rightId){
+    T.rX=x; T.rY=y;
+    const dy=y-T.rStartY;
+    if(!T.swiped){
+      if(dy<-26){ T.swiped='up'; T.jumpHeld=true; emitHit('arrowup'); T.ripples.push({x,y,t:0.45,kind:'jump'}); }
+      else if(dy>34){ T.swiped='down'; emitHit('s'); T.ripples.push({x,y,t:0.5,kind:'gave'}); }
+    } else if(T.swiped==='up'){
+      T.jumpHeld = dy < -8;                   // vinger omhoog houden = blijven zweven
+    }
+  }
+}
+function endTouch(id,x,y){
+  if(id===T.joyId){ T.joyId=null; T.axisX=0; T.up=false; T.down=false; T.active=false; }
+  else if(id===T.rightId){
+    const dt=game.tijd-T.rStartT, dist=Math.hypot(x-T.rStartX,y-T.rStartY);
+    if(!T.swiped && dist<22 && dt<0.32){ emitHit('x'); T.ripples.push({x,y,t:0.4,kind:'tap'}); }
+    T.rightId=null; T.jumpHeld=false; T.swiped=false;
+  }
+}
+cv.addEventListener('touchstart', e=>{ audio(); e.preventDefault();
+  for(const t of e.changedTouches){ const p=canvasPos(t); startTouch(t.identifier,p.x,p.y); } }, {passive:false});
+cv.addEventListener('touchmove', e=>{ e.preventDefault();
+  for(const t of e.changedTouches){ const p=canvasPos(t); moveTouch(t.identifier,p.x,p.y); } }, {passive:false});
+cv.addEventListener('touchend', e=>{ e.preventDefault();
+  for(const t of e.changedTouches){ const p=canvasPos(t); endTouch(t.identifier,p.x,p.y); } }, {passive:false});
+cv.addEventListener('touchcancel', e=>{
+  for(const t of e.changedTouches){ endTouch(t.identifier,T.curX,T.curY); } }, {passive:false});
+
+// muis (desktop)
+cv.addEventListener('click', e=>{ audio(); if(isTouch) return; const p=canvasPos(e); uiTapAt(p.x,p.y); });
+
+/* ---------------- Personages ---------------- */
+const CHARS = {
+  rinmi: { naam:'Rinmi', h:48,
+    pak:'#9a6b3a', pak2:'#c9a26b', huid:'#f0cda2', haar:'#241509',
+    gave:'Watergolf', gaveCd:5,
+    gaveUitleg:'Water geneest haar en ze zwemt als een vis. Gave: een genezende watergolf naar twee kanten.',
+    blurb:'De kalme oceaan. 1,91 m lang, blote voeten, vuur in haar blik.',
+    stats:{kracht:1,vita:1,snel:1} },
+  kana: { naam:'Kana', h:44,
+    pak:'#c43030', pak2:'#e8604a', huid:'#f0cda2', haar:'#1a1a1a',
+    gave:'Bliksem-dash', gaveCd:5,
+    gaveUitleg:'Sterk en snel. Gave: een rode bliksemschicht-dash die vijanden omver beukt.',
+    blurb:'Sterk, direct en wantrouwig. In haar rode pak een rode bliksemschicht.',
+    stats:{kracht:2,vita:1,snel:1} },
+  yuna: { naam:'Yuna', h:44,
+    pak:'#5a7a3a', pak2:'#7a9a55', huid:'#f0cda2', haar:'#332211',
+    gave:'Valstrik', gaveCd:4,
+    gaveUitleg:'De uitvinder. Gave: plaatst valstrikken die vijanden wegjagen. Start met extra levensmiddel.',
+    blurb:'Wapenmaker en plannenmaker. Mosgroen pak vol vakjes.',
+    stats:{kracht:1,vita:1,snel:1} },
+  qingfei: { naam:'Qingfei', h:44,
+    pak:'#7ab8e0', pak2:'#a8d4ee', huid:'#f5d9ae', haar:'#1a1208',
+    gave:'Windvlaag', gaveCd:5,
+    gaveUitleg:'Kalm als lucht. Houd springen ingedrukt om te ZWEVEN! Gave: een windvlaag die vijanden wegblaast.',
+    blurb:'De verkenner uit China. Licht zweven — haar armen zijn vleugels.',
+    stats:{kracht:1,vita:1,snel:2} },
+  seojin: { naam:'Seojin', h:48,
+    pak:'#8a7a66', pak2:'#b0a08a', huid:'#f0cda2', haar:'#2a1c10',
+    gave:'Rotskracht', gaveCd:1.6,
+    gaveUitleg:'Rinmi’s tweelingzus. Gave: duwt rotsen opzij met één vinger, of maakt een tijdelijke rots om op te klimmen.',
+    blurb:'Dapper en direct. Verplaatst rotsen met één vinger.',
+    stats:{kracht:1,vita:2,snel:1} },
+};
+const CHARKEYS = ['rinmi','kana','yuna','qingfei','seojin'];
+
+/* ---------------- Wapens ---------------- */
+const WAPENS = {
+  zwaard:      { naam:'Zwaard',       dmg:13, cd:0.32, type:'melee', reik:42,
+                 uitleg:'Snel en betrouwbaar. Hakt van dichtbij.' },
+  boog:        { naam:'Pijl & Boog',  dmg:10, cd:0.5,  type:'pijl',
+                 uitleg:'Schiet pijlen van veraf. Veilig op afstand.' },
+  zwaaibanden: { naam:'Zwaaibanden',  dmg:9,  cd:0.36, type:'spin',  reik:50,
+                 uitleg:'Rinmi’s erfstuk. Raakt vijanden aan TWEE kanten.' },
+  katapult:    { naam:'Katapult',     dmg:15, cd:0.7,  type:'steen',
+                 uitleg:'Slingert zware stenen in een boog. Langzaam maar hard.' },
+};
+const WAPENKEYS = ['zwaard','boog','zwaaibanden','katapult'];
+
+/* ---------------- Kaart-hulpjes ---------------- */
+function makeGrid(w){ const g=[]; for(let y=0;y<ROWS;y++) g.push(new Array(w).fill(' ')); return g; }
+function grond(g,x0,x1,top){ for(let x=x0;x<=x1;x++) for(let y=top;y<ROWS;y++) g[y][x]='#'; }
+function water(g,x0,x1,top){ for(let x=x0;x<=x1;x++) for(let y=top;y<ROWS;y++) g[y][x]='W'; }
+function plat(g,x0,x1,y){ for(let x=x0;x<=x1;x++) g[y][x]='='; }
+function muur(g,x,y0,y1){ for(let y=y0;y<=y1;y++) g[y][x]='#'; }
+function S(g,x,y,c){ g[y][x]=c; }
+
+/* ---------------- Levels ---------------- */
+function levelProloog(){
+  const w=70, g=makeGrid(w);
+  grond(g,0,w-1,13);
+  plat(g,25,29,10); plat(g,20,22,11);
+  grond(g,44,48,11);
+  water(g,50,53,13); plat(g,51,52,10);
+  S(g,2,12,'P'); S(g,6,12,'o');
+  S(g,14,12,'s'); S(g,27,8,'s'); S(g,45,10,'s');
+  S(g,19,12,'d'); S(g,34,12,'d');
+  S(g,10,12,'m'); S(g,23,12,'m'); S(g,28,7,'m'); S(g,41,12,'m'); S(g,52,8,'m'); S(g,58,12,'m');
+  S(g,60,12,'f');
+  S(g,67,12,'X');
+  return { grid:g, w, theme:'dorp', naam:'Proloog — Het Dorp',
+    doel:'training', doelTekst:'Pak 3 trainingsstenen en versla 2 oefenpoppen' };
+}
+
+function levelEiland(){
+  const w=150, g=makeGrid(w);
+  grond(g,0,w-1,13);
+  water(g,24,27,13); plat(g,25,26,10);
+  water(g,60,64,13); plat(g,61,63,10);
+  water(g,98,101,13); plat(g,99,100,10);
+  grond(g,86,92,11);
+  grond(g,126,133,11);
+  plat(g,16,19,9);  S(g,17,8,'C'); plat(g,12,14,11);
+  plat(g,44,47,8);  S(g,45,7,'b'); S(g,46,7,'l'); plat(g,40,42,11);
+  plat(g,74,76,10);
+  S(g,78,12,'C');
+  plat(g,104,107,9); S(g,105,8,'b');
+  plat(g,116,119,9); S(g,118,8,'C');
+  S(g,12,12,'k'); S(g,33,12,'k'); S(g,52,12,'k'); S(g,70,12,'k');
+  S(g,76,12,'k'); S(g,81,12,'k'); S(g,89,10,'k'); S(g,112,12,'k');
+  S(g,124,12,'k'); S(g,128,10,'k'); S(g,136,12,'b'); S(g,142,12,'g');
+  S(g,37,12,'^'); S(g,67,12,'^'); S(g,110,12,'^');
+  S(g,57,12,'f'); S(g,93,10,'w'); S(g,120,12,'f');
+  S(g,8,12,'m'); S(g,20,8,'m'); S(g,26,9,'m'); S(g,40,12,'m'); S(g,49,12,'m');
+  S(g,62,9,'m'); S(g,72,12,'m'); S(g,85,12,'m'); S(g,95,12,'m'); S(g,106,8,'m');
+  S(g,115,12,'m'); S(g,121,8,'m'); S(g,130,10,'m'); S(g,139,12,'m');
+  S(g,2,12,'P'); S(g,147,12,'X');
+  return { grid:g, w, theme:'eiland', naam:'Level 1 — Het Eiland',
+    doel:'kooien', doelTekst:'Bevrijd de 3 gevangenen uit de kooien' };
+}
+
+function levelGrotten(){
+  const w=170, g=makeGrid(w);
+  grond(g,0,w-1,14);
+  for(let x=0;x<w;x++) g[0][x]='#';
+  // eerste blokkade: muur met rotsen eronder — klim eroverheen of duw als Seojin
+  muur(g,20,9,11); S(g,20,12,'R'); S(g,20,13,'R'); plat(g,16,18,11);
+  plat(g,34,36,12); plat(g,30,33,10); S(g,31,9,'m');
+  plat(g,38,41,8); S(g,39,7,'b');
+  water(g,48,53,14); plat(g,49,52,11);
+  S(g,60,13,'l');
+  // tweede blokkade
+  muur(g,70,8,11); S(g,70,12,'R'); S(g,70,13,'R'); plat(g,63,64,12); plat(g,66,68,10);
+  plat(g,99,101,12); plat(g,103,106,10); S(g,105,9,'b');
+  plat(g,121,123,11); plat(g,126,129,8); S(g,127,7,'b');
+  // bonusgang met laag plafond, afgesloten door rotsen (Seojin-route)
+  for(let x=130;x<=140;x++) g[11][x]='#';
+  S(g,133,12,'R'); S(g,133,13,'R');
+  S(g,136,13,'m'); S(g,137,13,'m'); S(g,138,13,'l'); S(g,139,13,'w');
+  S(g,28,13,'k'); S(g,45,13,'k'); S(g,58,13,'k'); S(g,76,13,'k');
+  S(g,85,13,'g'); S(g,95,13,'k'); S(g,113,13,'k'); S(g,120,13,'k');
+  S(g,144,13,'k'); S(g,150,13,'g'); S(g,156,13,'b');
+  S(g,90,13,'f'); S(g,110,13,'f');
+  S(g,10,13,'m'); S(g,17,10,'m'); S(g,25,13,'m'); S(g,35,13,'m'); S(g,42,13,'m');
+  S(g,50,10,'m'); S(g,55,13,'m'); S(g,67,9,'m'); S(g,80,13,'m'); S(g,100,13,'m');
+  S(g,104,9,'m'); S(g,117,13,'m'); S(g,125,13,'m'); S(g,148,13,'m'); S(g,160,13,'m');
+  S(g,2,13,'P'); S(g,167,13,'X');
+  return { grid:g, w, theme:'grot', naam:'Level 2 — De Grotten',
+    doel:'bereik', doelTekst:'Vind de uitgang van Akuma’s gangen' };
+}
+
+function levelArena(){
+  const w=64, g=makeGrid(w);
+  grond(g,0,w-1,13);
+  muur(g,0,6,12); muur(g,1,8,12);
+  muur(g,62,8,12); muur(g,63,6,12);
+  plat(g,14,19,9); plat(g,22,26,10); plat(g,30,35,8); plat(g,38,42,11); plat(g,46,51,9);
+  S(g,4,12,'f'); S(g,6,12,'l'); S(g,8,12,'w');
+  S(g,24,12,'k'); S(g,40,12,'k'); S(g,32,7,'b'); S(g,52,12,'g');
+  S(g,56,12,'A');
+  S(g,3,12,'P');
+  return { grid:g, w, theme:'arena', naam:'Level 3 — De Laatste Strijd',
+    doel:'baas', doelTekst:'Versla Akuma en bevrijd Korea!' };
+}
+
+const LEVELS = { proloog:levelProloog, eiland:levelEiland, grotten:levelGrotten, arena:levelArena };
+
+/* ---------------- Verhaal ---------------- */
+const VERHALEN = {
+  intro: [
+    { art:'dorp', titel:'Het dorp',
+      lines:['Een oude vrouw vond de baby in het water en voedde haar op.',
+             'Rinmi noemde haar gewoon "oma". Ze werd de sterkste én kalmste',
+             'van het dorp — en met 1,91 m ook veruit de langste.',
+             'Maar eerst... moet ze leren vechten!',
+             '',
+             'PROLOOG: loop naar oma toe — ze legt alles uit.'] },
+  ],
+  groei: [
+    { art:'dorp', titel:'Jaren later...',
+      lines:['Rinmi redde Kána van de krijgers ("Ik had het ónder controle!").',
+             'Samen bevrijdden ze Yuna — die ooit gif in Akuma’s eten deed',
+             'én splinters in zijn bed. Ze ontmoetten Qingfei uit China,',
+             'en Rinmi vond zelfs haar tweelingzus: Seojin!'] },
+    { art:'dorp', titel:'Vijf meiden, vijf gaven',
+      lines:['"Nae ai!" is hun strijdkreet — het begin van de zin van hun ouders.',
+             'Vijf vriendinnen die zijn blijven vechten. Samen zijn ze sterk.',
+             '',
+             'Met wie speel jij het grote avontuur?',
+             '(Je mun, score en niveau uit de proloog gaan gewoon mee.)'] },
+  ],
+  eiland: [
+    { art:'eiland', titel:'Het Eiland',
+      lines:['Op het eiland in het grote meer staat de oude gevangenis van',
+             'Het Zwarte Leger. "Dit was het ergste wat ze ooit hadden gezien."',
+             'Er zitten nog gevangenen vast! Sla de 3 kooien open en zoek',
+             'de uitgang. En let op je HONGER: van honger kun je doodgaan!'] },
+  ],
+  rit: [
+    { art:'paard', titel:'Te paard naar Akuma',
+      lines:['Akuma woont ver weg, in een huis met donkere gangen eronder.',
+             'De vrienden springen op de paarden die de Chinezen achterlieten.',
+             '"Naar Akuma. Naar de overwinning!"',
+             '',
+             'Spring over de rotsen, hekken en struiken. En pak de mun!'] },
+  ],
+  grot: [
+    { art:'grot', titel:'De gangen onder het huis',
+      lines:['Akuma kocht een huis met een kelder vol donkere gangen.',
+             'De keizer van China stuurde per post een brief en wees jullie',
+             'een geheime ingang. (Een soort postduif, legde Qingfei uit.)',
+             'Het is er pikdonker... en vol soldaten. Vind de uitgang!'] },
+  ],
+  strijd: [
+    { art:'paleis', titel:'De Laatste Strijd',
+      lines:['Dit is het. Boven de grond wacht Akuma met zijn laatste leger.',
+             '"Beter 1 persoon verslagen dan 4000," zei Yuna. "Nae ai!"',
+             'Versla eerst de soldaten, en dan... Akuma zelf.',
+             '',
+             'Tip: koop eerst levensmiddel én de Wapensmid bij oma.'] },
+  ],
+};
+
+/* ---------------- Grappen & verwijzingen (uit het boek) ---------------- */
+const VIJANDQUIPS = {
+  krijger:  ['"Awoeawoeoea!"','"Niet die meiden weer!"','"Het Zwarte Leger... aiii"','"Ik ga al!"'],
+  schutter: ['"Mis!"','"Mijn pijlen!"','"Onmogelijk!"'],
+  generaal: ['"Onverslaanbaar... niet dus."','"Akuma! Heeeelp!"','"Naar de gevangenis met mij..."'],
+};
+const WISTJE = [
+  'Wist je dat? Rinmi’s naam betekent "De kalme oceaan".',
+  'Wist je dat? Yuna deed ooit gif in Akuma’s eten én splinters in zijn bed.',
+  'Wist je dat? Qingfei ontdekte in Europa "koekjes" en "stoofperen".',
+  'Wist je dat? Seojin en Rinmi zijn een tweeling — herkend aan hun kettingen.',
+  'Wist je dat? Kana is smoor op Sora-Ren. Niet dat ze dat ooit toegeeft.',
+  'Wist je dat? Gun-Woo doet stoer, maar is eigenlijk hartstikke verlegen.',
+  'Wist je dat? De jongensgroep heet "San-eseo on daseot" — de vijf uit de bergen.',
+  'Wist je dat? Min-Joons ring is een blauwe draak met een lotus in zijn mond.',
+  'Wist je dat? "Levensmiddel" houdt mensen die bijna doodgaan in leven.',
+  'Wist je dat? De glijbaan in de grot werkt op echt "glijmiddel".',
+  'Wist je dat? China en Japan gaven het rijk mun, zodat Korea weer vrij wordt.',
+  'Wist je dat? Rinmi is 1,91 m — de langste van het dorp.',
+  'Tip: eet op tijd met de 🍙-knop (of toets 1). Van honger ga je dood!',
+  'Tip: water geneest alleen Rínmi. De andere meiden roepen "Brr!".',
+  'Tip: Qingfei kan zweven — houd het springen ingedrukt.',
+  'Tip: Seojin duwt rotsen opzij; zo open je kortere routes.',
+];
+function nieuweTip(){ game.tip = WISTJE[(Math.random()*WISTJE.length)|0]; }
+const BESTUUR_TOUCH = ['Joystick links = lopen · veeg rechts omhoog = springen',
+                       'Tik rechts = aanvallen · veeg rechts omlaag = je gave'];
+const BESTUUR_TOETS = ['← → lopen · Spatie springen · X aanvallen',
+                       'S = je gave · 1 = eten · 2 = drinken · C = wapen'];
+function bestuurRegels(){ return isTouch ? BESTUUR_TOUCH : BESTUUR_TOETS; }
+function omaRegels(i){
+  if(i===0) return ['"Dag mijn kind! Luister goed naar oma:"', ...bestuurRegels(),
+    '"Pak 3 trainingsstenen en versla 2 oefenpoppen."',
+    '"En vergeet nooit te eten, kind. Van honger ga je dood!"'];
+  return ['"Nóg een keer, kind? Goed dan:"',
+    '"Ik gaf les in zelfbeheersing en wijsheid, weet je."',
+    '"Op de Maeul Chodeung Hakgyo — de dorpsschool."', ...bestuurRegels(),
+    '"Maak je training af, dan gaat de poort open."'];
+}
+
+/* ---------------- Spelverloop (flow) ---------------- */
+const FLOW = [
+  {type:'cutscene', key:'opening'},
+  {type:'story', key:'intro'},
+  {type:'level', key:'proloog'},
+  {type:'story', key:'groei'},
+  {type:'select'},
+  {type:'weapons'},
+  {type:'story', key:'eiland'},
+  {type:'level', key:'eiland'},
+  {type:'shop'},
+  {type:'story', key:'rit'},
+  {type:'ride'},
+  {type:'shop'},
+  {type:'story', key:'grot'},
+  {type:'level', key:'grotten'},
+  {type:'shop'},
+  {type:'cutscene', key:'akuma'},
+  {type:'story', key:'strijd'},
+  {type:'level', key:'arena'},
+  {type:'cutscene', key:'finale'},
+  {type:'victory'},
+];
+
+/* ---------------- Speltoestand ---------------- */
+const game = {
+  state:'title', flowIdx:-1,
+  player:null, level:null,
+  enemies:[], items:[], projs:[], traps:[], parts:[], floaters:[],
+  tempRocks:[], gevangenen:[],
+  boss:null, bossDood:0,
+  camX:0, camY:0, shake:0, tijd:0, hitstop:0,
+  storySlides:null, storyIdx:0, tip:'',
+  selIdx:0, wapenSel:[],
+  ride:null,
+  dialog:null, cut:null,
+  hintHonger:false,
+  hi: parseInt(localStorage.getItem('rinmi_hi')||'0',10),
+};
+
+function nieuwSpeler(charKey){
+  const c = CHARS[charKey];
+  const st = Object.assign({}, c.stats);
+  const p = {
+    charKey, w:22, h:c.h, x:0, y:0, vx:0, vy:0, facing:1,
+    onGround:false, swim:false, loopT:0,
+    stats:st, smid:0,
+    hp:0, maxHp:0,
+    honger:100, waterT:0, waterDmgT:0, dorenT:0,
+    xp:0, niveau:1, score:0, mun:0, levens:3,
+    inv:{ eten:2, water:1, levens: charKey==='yuna'?2:1 },
+    wapens:['zwaaibanden','katapult'], wapenIdx:0, atkCd:0, atkAnim:0,
+    gaveCd:0, dashT:0, invuln:0, glijT:0,
+  };
+  p.maxHp = 85 + 15*st.vita;
+  p.hp = p.maxHp;
+  return p;
+}
+function speedMult(p){ return 1 + 0.06*(p.stats.snel-1); }
+function dmgMult(p){ return 1 + 0.15*(p.stats.kracht-1) + 0.10*p.smid; }
+function xpNodig(p){ return p.niveau*80; }
+
+/* ---------------- Level laden ---------------- */
+function laadLevel(key){
+  const def = LEVELS[key]();
+  game.level = { key, grid:def.grid, w:def.w, theme:def.theme, naam:def.naam,
+    doel:def.doel, doelTekst:def.doelTekst,
+    kooien:0, poppen:0, stenen:0 };
+  game.enemies=[]; game.items=[]; game.projs=[]; game.traps=[];
+  game.parts=[]; game.floaters=[]; game.tempRocks=[]; game.gevangenen=[];
+  game.boss=null; game.bossDood=0;
+  const g = def.grid;
+  for(let y=0;y<ROWS;y++) for(let x=0;x<def.w;x++){
+    const c = g[y][x], px = x*TILE, py = y*TILE;
+    const bodem = py+TILE; // onderkant van de tegel
+    switch(c){
+      case 'P': game.player.x = px+5; game.player.y = bodem - game.player.h; g[y][x]=' '; break;
+      case 'o': game.items.push({type:'oma', x:px, y:bodem-46, w:28, h:46}); g[y][x]=' '; break;
+      case 'm': game.items.push({type:'munt', x:px+8, y:py+8, w:16, h:16}); g[y][x]=' '; break;
+      case 'l': game.items.push({type:'levens', x:px+6, y:py+6, w:20, h:20}); g[y][x]=' '; break;
+      case 'f': game.items.push({type:'eten', x:px+6, y:py+6, w:20, h:20}); g[y][x]=' '; break;
+      case 'w': game.items.push({type:'water', x:px+8, y:py+4, w:16, h:24}); g[y][x]=' '; break;
+      case 's': game.items.push({type:'steen', x:px+8, y:py+10, w:18, h:16}); game.level.stenen++; g[y][x]=' '; break;
+      case 'C': game.items.push({type:'kooi', x:px-4, y:bodem-52, w:40, h:52, hp:3}); game.level.kooien++; g[y][x]=' '; break;
+      case 'X': game.items.push({type:'uitgang', x:px, y:bodem-64, w:32, h:64}); g[y][x]=' '; break;
+      case 'd': game.enemies.push(maakVijand('pop', px, bodem)); game.level.poppen++; g[y][x]=' '; break;
+      case 'k': game.enemies.push(maakVijand('krijger', px, bodem)); g[y][x]=' '; break;
+      case 'b': game.enemies.push(maakVijand('schutter', px, bodem)); g[y][x]=' '; break;
+      case 'g': game.enemies.push(maakVijand('generaal', px, bodem)); g[y][x]=' '; break;
+      case 'A': game.boss = maakBaas(px, bodem); g[y][x]=' '; break;
+    }
+  }
+  game.player.vx=0; game.player.vy=0; game.player.invuln=1.2;
+  snapCamera();
+  game.state='play';
+}
+
+function maakVijand(type, px, bodem){
+  const def = {
+    pop:      { w:22, h:40, hp:20,  dmg:0,  snel:0,   xp:10, mun:0 },
+    krijger:  { w:24, h:44, hp:30,  dmg:8,  snel:1.0, xp:20, mun:3 },
+    schutter: { w:24, h:44, hp:25,  dmg:0,  snel:0,   xp:25, mun:4 },
+    generaal: { w:30, h:52, hp:90,  dmg:14, snel:1.5, xp:60, mun:10 },
+  }[type];
+  return { type, x:px+3, y:bodem-def.h, w:def.w, h:def.h, vx:0, vy:0,
+    hp:def.hp, maxHp:def.hp, dmg:def.dmg, snel:def.snel, xp:def.xp, munDrop:def.mun,
+    dir:-1, flash:0, stun:0, schietCd:1.5+(px%3)*0.5, wob:px };
+}
+function maakBaas(px, bodem){
+  return { type:'akuma', x:px, y:bodem-84, w:56, h:84, vx:0, vy:0,
+    hp:520, maxHp:520, dir:-1, flash:0, orbCd:2.2, dashCd:5, dashT:0,
+    opgeroepen:{p66:false, p33:false} };
+}
+
+/* ---------------- Tegels & botsing ---------------- */
+function tile(tx,ty){
+  const L = game.level;
+  if(!L || tx<0 || tx>=L.w) return '#';
+  if(ty<0 || ty>=ROWS) return ' ';
+  return L.grid[ty][tx];
+}
+function tileAtPx(px,py){ return tile(Math.floor(px/TILE), Math.floor(py/TILE)); }
+function solidChar(c){ return c==='#'||c==='='||c==='R'; }   // telt als 'grond' (detectie/projectielen)
+function fullSolid(c){ return c==='#'||c==='R'; }            // blokkeert van alle kanten
+function solidAt(px,py){ return solidChar(tileAtPx(px,py)); }
+
+// '=' platforms zijn éénrichting: je springt er van onderaf doorheen en landt erbovenop.
+function moveCollide(e, f){
+  // horizontaal — alleen volledig vaste tegels blokkeren
+  e.x += e.vx*f;
+  if(e.vx>0){
+    const tx = Math.floor((e.x+e.w)/TILE);
+    for(let ty=Math.floor(e.y/TILE); ty<=Math.floor((e.y+e.h-1)/TILE); ty++){
+      if(fullSolid(tile(tx,ty))){ e.x = tx*TILE - e.w - 0.01; e.vx=0; e.muur=1; break; }
+    }
+  } else if(e.vx<0){
+    const tx = Math.floor(e.x/TILE);
+    for(let ty=Math.floor(e.y/TILE); ty<=Math.floor((e.y+e.h-1)/TILE); ty++){
+      if(fullSolid(tile(tx,ty))){ e.x = (tx+1)*TILE + 0.01; e.vx=0; e.muur=-1; break; }
+    }
+  }
+  // verticaal
+  const prevBottom = e.y + e.h;
+  e.y += e.vy*f;
+  e.onGround = false;
+  if(e.vy>0){
+    const ty = Math.floor((e.y+e.h)/TILE);
+    for(let tx=Math.floor(e.x/TILE); tx<=Math.floor((e.x+e.w-1)/TILE); tx++){
+      const c = tile(tx,ty);
+      if(c==='#'||c==='R'){ e.y = ty*TILE - e.h - 0.01; e.vy=0; e.onGround=true; break; }
+      if(c==='='){ // alleen landen als je van bovenaf komt en niet bewust doorzakt
+        if(!e.dropThrough && prevBottom <= ty*TILE + 8){ e.y = ty*TILE - e.h - 0.01; e.vy=0; e.onGround=true; break; }
+      }
+    }
+  } else if(e.vy<0){
+    const ty = Math.floor(e.y/TILE);
+    for(let tx=Math.floor(e.x/TILE); tx<=Math.floor((e.x+e.w-1)/TILE); tx++){
+      if(fullSolid(tile(tx,ty))){ e.y = (ty+1)*TILE + 0.01; e.vy=0; break; }
+    }
+  }
+  // onder de kaart: onzichtbare vloer
+  const mapH = ROWS*TILE;
+  if(e.y+e.h > mapH){ e.y = mapH-e.h; e.vy=0; e.onGround=true; }
+}
+function overlap(a,b){ return a.x<b.x+b.w && a.x+a.w>b.x && a.y<b.y+b.h && a.y+a.h>b.y; }
+
+/* ---------------- Effecten ---------------- */
+function poef(x,y,kleur,n){
+  for(let i=0;i<(n||10);i++){
+    const a = (i/(n||10))*Math.PI*2;
+    game.parts.push({x,y, vx:Math.cos(a)*(1.5+i%3), vy:Math.sin(a)*(1.5+i%2)-1,
+      life:0.6+(i%4)*0.1, kleur, size:3+(i%3)});
+  }
+}
+function sterren(x,y){
+  for(let i=0;i<8;i++){
+    const a = i/8*Math.PI*2;
+    game.parts.push({x,y, vx:Math.cos(a)*2.4, vy:Math.sin(a)*2.4-1.5,
+      life:0.8, kleur:'#ffe066', size:4, ster:true});
+  }
+}
+function floater(x,y,tekst,kleur){
+  game.floaters.push({x,y,tekst,kleur:kleur||'#fff',t:1.4});
+}
+function schud(n){ game.shake = Math.min(14, Math.max(game.shake, n)); }
+function hitstop(s){ game.hitstop = Math.max(game.hitstop, s); }
+
+/* ---------------- Camera (zacht + vooruitkijken) ---------------- */
+function updateCamera(dt){
+  const p = game.player, f = dt*60;
+  const mapW = game.level.w*TILE;
+  const lead = p.facing*64 + clamp(p.vx*7,-30,30);
+  const tx = clamp(p.x+p.w/2 - W/2 + lead, 0, Math.max(0,mapW-W));
+  const ty = clamp(p.y+p.h/2 - H/2 - 20, 0, Math.max(0,ROWS*TILE-H));
+  const k = 1 - Math.pow(0.80, f);
+  game.camX += (tx-game.camX)*k;
+  game.camY += (ty-game.camY)*k;
+  if(game.shake>0) game.shake = Math.max(0, game.shake - dt*26);
+}
+function snapCamera(){
+  const p = game.player, mapW = game.level.w*TILE;
+  game.camX = clamp(p.x+p.w/2 - W/2, 0, Math.max(0,mapW-W));
+  game.camY = clamp(p.y+p.h/2 - H/2 - 20, 0, Math.max(0,ROWS*TILE-H));
+}
+
+/* ---------------- Sfeer: kersenbloesem, stof & vonken ---------------- */
+const SFEER = [];
+function nieuwPetal(rand){
+  return { x:Math.random()*W, y: rand? Math.random()*H : -12-Math.random()*40,
+    vx:-0.25-Math.random()*0.7, vy:0.35+Math.random()*0.8,
+    rot:Math.random()*6.28, vr:(Math.random()-0.5)*0.08,
+    size:4+Math.random()*5, sway:Math.random()*6.28, ph:Math.random() };
+}
+for(let i=0;i<30;i++) SFEER.push(nieuwPetal(true));
+function updateSfeer(dt){
+  const f = dt*60;
+  for(const s of SFEER){
+    s.sway += 0.035*f;
+    s.x += (s.vx + Math.sin(s.sway)*0.55)*f;
+    s.y += s.vy*f;
+    s.rot += s.vr*f;
+    if(s.y>H+14 || s.x<-18){ Object.assign(s, nieuwPetal(false)); s.x = Math.random()*(W+40); }
+  }
+}
+function tekenSfeer(theme){
+  let kleuren, alpha=0.85, schaal=1, omhoog=false;
+  if(theme==='grot'){ kleuren=['#9ab4e0','#6f86c0']; alpha=0.35; schaal=0.6; }
+  else if(theme==='arena'){ kleuren=['#ffd27a','#ff9a4a','#ffec9a']; alpha=0.75; omhoog=true; }
+  else { kleuren=['#ffd4e6','#f7b8d6','#ffe1ee','#fcc8de']; alpha=0.9; }
+  for(const s of SFEER){
+    const y = omhoog ? (H - s.y) : s.y;
+    cx.save();
+    cx.globalAlpha = alpha * (0.6+0.4*Math.sin(s.sway*1.3));
+    cx.translate(s.x, y);
+    cx.rotate(s.rot);
+    cx.fillStyle = kleuren[(s.size|0)%kleuren.length];
+    const w = s.size*schaal, h = s.size*0.62*schaal;
+    if(theme==='grot'||theme==='arena'){
+      cx.beginPath(); cx.ellipse(0,0,w*0.5,w*0.5,0,0,7); cx.fill();
+    } else {
+      // klein bloesemblaadje
+      cx.beginPath();
+      cx.moveTo(0,-h); cx.quadraticCurveTo(w,-h*0.3, 0,h);
+      cx.quadraticCurveTo(-w,-h*0.3, 0,-h); cx.fill();
+    }
+    cx.restore();
+  }
+  cx.globalAlpha = 1;
+}
+
+/* ---------------- Vignet ---------------- */
+let _vig=null;
+function tekenVignet(sterkte){
+  if(!_vig){
+    _vig = cx.createRadialGradient(W/2,H*0.46,H*0.34, W/2,H*0.5,H*0.92);
+    _vig.addColorStop(0,'rgba(0,0,0,0)');
+    _vig.addColorStop(1,'rgba(0,0,0,0.42)');
+  }
+  cx.globalAlpha = sterkte==null?1:sterkte;
+  cx.fillStyle=_vig; cx.fillRect(0,0,W,H);
+  cx.globalAlpha = 1;
+}
+
+/* ---------------- XP / niveau ---------------- */
+function geefXp(n){
+  const p = game.player;
+  p.xp += n;
+  if(p.xp >= xpNodig(p)){
+    p.xp -= xpNodig(p);
+    p.niveau++;
+    SFX.niveau();
+    game.state='levelup';
+  }
+}
+
+/* ---------------- Schade ---------------- */
+function raakVijand(e, dmg, kbDir){
+  e.hp -= dmg; e.flash = 0.15; e.stun = 0.25;
+  e.vx = (kbDir||0)*3;
+  floater(e.x+e.w/2, e.y-6, '-'+Math.round(dmg), '#ffd');
+  SFX.raak();
+  if(e.hp<=0) verslaVijand(e);
+}
+function verslaVijand(e){
+  e.dood = true;
+  sterren(e.x+e.w/2, e.y+e.h/2);
+  poef(e.x+e.w/2, e.y+e.h/2, '#aab', 8);
+  schud(e.type==='generaal'?6:2); hitstop(0.03);
+  if(VIJANDQUIPS[e.type] && Math.random()<0.5)
+    floater(e.x+e.w/2, e.y-52, VIJANDQUIPS[e.type][(Math.random()*VIJANDQUIPS[e.type].length)|0], '#cdf');
+  SFX.poef();
+  const p = game.player;
+  p.score += e.xp;
+  if(e.munDrop>0){ p.mun += e.munDrop; floater(e.x+e.w/2, e.y-22, '+'+e.munDrop+' mun', '#ffd700'); }
+  floater(e.x+e.w/2, e.y-38, '+'+e.xp+' XP', '#8cf');
+  if(e.type==='pop' && game.level.doel==='training') game.level.poppen--;
+  geefXp(e.xp);
+}
+function raakSpeler(dmg, vanX){
+  const p = game.player;
+  if(p.invuln>0 || p.dashT>0) return;
+  p.hp -= dmg; p.invuln = 1.1;
+  p.vx = (p.x+p.w/2 < vanX ? -4 : 4); p.vy = -3;
+  floater(p.x+p.w/2, p.y-10, 'Au!', '#f88');
+  schud(5); hitstop(0.04);
+  SFX.au();
+  if(p.hp<=0) sterf();
+}
+function sterf(){
+  const p = game.player;
+  p.levens--;
+  poef(p.x+p.w/2, p.y+p.h/2, '#fff', 16);
+  if(p.levens<=0){
+    if(p.score>game.hi){ game.hi=p.score; localStorage.setItem('rinmi_hi',''+game.hi); }
+    game.state='gameover';
+  } else {
+    // herstart huidig level, spullen blijven
+    p.hp = p.maxHp; p.honger = Math.max(p.honger,70);
+    const cur = FLOW[game.flowIdx];
+    if(cur && cur.type==='ride'){
+      game.ride = bouwRit(); game.state='ride';
+      floater(220, 340, 'Nog '+p.levens+' levens!', '#fff');
+    } else {
+      if(cur && cur.type==='level') laadLevel(cur.key);
+      floater(p.x+p.w/2, p.y-20, 'Nog '+p.levens+' levens!', '#fff');
+    }
+  }
+}
+
+/* ---------------- Aanvallen ---------------- */
+function valAan(){
+  const p = game.player;
+  if(p.atkCd>0) return;
+  const wk = p.wapens[p.wapenIdx], wpn = WAPENS[wk];
+  p.atkCd = wpn.cd; p.atkAnim = 0.18;
+  const dmg = wpn.dmg * dmgMult(p);
+  SFX.slag();
+  if(wpn.type==='melee'){
+    meleeHit({x: p.facing>0 ? p.x+p.w : p.x-wpn.reik, y:p.y, w:wpn.reik, h:p.h}, dmg, p.facing);
+  } else if(wpn.type==='spin'){
+    meleeHit({x:p.x-wpn.reik, y:p.y-4, w:p.w+wpn.reik*2, h:p.h+8}, dmg, p.facing);
+  } else if(wpn.type==='pijl'){
+    game.projs.push({type:'pijl', vriend:true, x:p.x+p.w/2, y:p.y+14, w:14, h:4,
+      vx:10*p.facing, vy:0, grav:0.02, dmg, t:2});
+  } else if(wpn.type==='steen'){
+    game.projs.push({type:'steen', vriend:true, x:p.x+p.w/2, y:p.y+8, w:12, h:12,
+      vx:6.5*p.facing, vy:-5.5, grav:0.35, dmg, t:3});
+  }
+}
+function meleeHit(rect, dmg, dir){
+  for(const e of game.enemies) if(!e.dood && overlap(rect,e)) raakVijand(e,dmg,dir);
+  if(game.boss && !game.boss.dood && overlap(rect,game.boss)) raakBaas(dmg);
+  for(const it of game.items){
+    if(it.type==='kooi' && !it.open && overlap(rect,it)) raakKooi(it);
+  }
+}
+function raakKooi(it){
+  it.hp--;
+  poef(it.x+it.w/2, it.y+it.h/2, '#cb9', 6);
+  SFX.raak();
+  if(it.hp<=0){
+    it.open = true;
+    game.level.kooien--;
+    game.player.score += 100;
+    game.gevangenen.push({x:it.x+8, y:it.y+it.h-40, t:3});
+    floater(it.x+it.w/2, it.y-10, 'Bevrijd! +100', '#9f9');
+    SFX.open();
+    geefXp(15);
+  }
+}
+function raakBaas(dmg){
+  const b = game.boss;
+  b.hp -= dmg; b.flash = 0.15;
+  floater(b.x+b.w/2, b.y-8, '-'+Math.round(dmg), '#ffd');
+  SFX.raak();
+  schud(5);
+  if(b.hp<=0 && !b.dood){
+    b.dood = true; game.bossDood = 2.2;
+    game.player.score += 300;
+    poef(b.x+b.w/2, b.y+b.h/2, '#a5f', 24);
+    schud(13); hitstop(0.12);
+    SFX.boss();
+    floater(b.x+b.w/2, b.y-20, 'Akuma is verslagen!', '#fff');
+    geefXp(300);
+  }
+}
+
+/* ---------------- Gaven ---------------- */
+function gebruikGave(){
+  const p = game.player;
+  if(p.gaveCd>0) return;
+  const c = CHARS[p.charKey];
+  p.gaveCd = c.gaveCd;
+  SFX.gave();
+  if(p.charKey==='rinmi'){
+    floater(p.x+p.w/2, p.y-16, 'Nae ai!', '#6cf');
+    for(const d of [-1,1]){
+      game.projs.push({type:'golf', vriend:true, x:p.x+p.w/2, y:p.y+10, w:26, h:30,
+        vx:5*d, vy:0, grav:0, dmg:16*dmgMult(p), t:1.4, geraakt:[]});
+    }
+    p.hp = Math.min(p.maxHp, p.hp+6);
+  } else if(p.charKey==='kana'){
+    p.dashT = 0.28; p.vx = 15*p.facing;
+    floater(p.x+p.w/2, p.y-16, 'Bliksem!', '#f66');
+  } else if(p.charKey==='yuna'){
+    if(game.traps.length>=3){ game.traps.shift(); }
+    game.traps.push({x:p.x+p.facing*26, y:p.y+p.h-10, w:26, h:10});
+    floater(p.x+p.w/2, p.y-16, 'Valstrik!', '#9d6');
+  } else if(p.charKey==='qingfei'){
+    floater(p.x+p.w/2, p.y-16, 'Windvlaag!', '#cef');
+    const rect = {x:p.x-130, y:p.y-40, w:260+p.w, h:p.h+80};
+    for(const e of game.enemies){
+      if(!e.dood && overlap(rect,e)){
+        const d = e.x > p.x ? 1 : -1;
+        e.vx = 8*d; e.vy = -3; e.stun = 0.6;
+        raakVijand(e, 6*dmgMult(p), d);
+      }
+    }
+    poef(p.x+p.w/2, p.y+p.h/2, '#dff', 14);
+  } else if(p.charKey==='seojin'){
+    floater(p.x+p.w/2, p.y-16, 'Nae ai!', '#db9');
+    if(!duwRots()){
+      // tijdelijke rots voor haar voeten
+      const tx = Math.floor((p.x+p.w/2)/TILE) + p.facing;
+      const ty = Math.floor((p.y+p.h-1)/TILE);
+      if(tile(tx,ty)===' '){
+        game.level.grid[ty][tx] = 'R';
+        game.tempRocks.push({tx,ty,t:6});
+        poef(tx*TILE+16, ty*TILE+16, '#b97', 8);
+      }
+    }
+  }
+}
+function duwRots(){
+  const p = game.player;
+  const ptx = Math.floor((p.x+p.w/2)/TILE);
+  const top = Math.floor(p.y/TILE), bot = Math.floor((p.y+p.h-1)/TILE);
+  for(let d=1; d<=2; d++){
+    const tx = ptx + d*p.facing;
+    for(let ty=bot; ty>=top-1; ty--){
+      if(tile(tx,ty)==='R'){
+        const ntx = tx + p.facing;
+        if(tile(ntx,ty)===' '){
+          game.level.grid[ty][tx] = ' ';
+          game.level.grid[ty][ntx] = 'R';
+          // verplaats eventueel ook de tijdelijke-rots-registratie
+          for(const tr of game.tempRocks) if(tr.tx===tx && tr.ty===ty){ tr.tx=ntx; }
+          poef(ntx*TILE+16, ty*TILE+16, '#b97', 10);
+          SFX.poef();
+          return true;
+        }
+      }
+    }
+  }
+  return false;
+}
+
+/* ---------------- Eten & drinken ---------------- */
+function eet(){
+  const p = game.player;
+  if(p.inv.eten<=0){ floater(p.x+p.w/2,p.y-12,'Geen etenspakket!','#faa'); SFX.fout(); return; }
+  if(p.honger>=99){ floater(p.x+p.w/2,p.y-12,'Geen honger!','#ddd'); return; }
+  p.inv.eten--; p.honger = Math.min(100, p.honger+55);
+  floater(p.x+p.w/2,p.y-12,'Mmm! Honger +55','#fc6'); SFX.eet();
+}
+function drink(){
+  const p = game.player;
+  if(p.inv.water<=0){ floater(p.x+p.w/2,p.y-12,'Geen waterfles!','#faa'); SFX.fout(); return; }
+  p.inv.water--; p.hp = Math.min(p.maxHp, p.hp+30);
+  floater(p.x+p.w/2,p.y-12,'Slok water! HP +30','#6cf'); SFX.eet();
+}
+function gebruikLevensmiddel(){
+  const p = game.player;
+  if(p.inv.levens<=0){ floater(p.x+p.w/2,p.y-12,'Geen levensmiddel!','#faa'); SFX.fout(); return; }
+  p.inv.levens--; p.hp = p.maxHp; p.honger = Math.min(100,p.honger+25);
+  floater(p.x+p.w/2,p.y-12,'Levensmiddel! Helemaal beter!','#9f9'); SFX.niveau();
+}
+
+/* ---------------- Speler-update ---------------- */
+function updateSpeler(dt){
+  const p = game.player, f = dt*60;
+  const c = CHARS[p.charKey];
+  const inWater = tileAtPx(p.x+p.w/2, p.y+p.h/2)==='W';
+
+  // sprong-gevoel: coyote-tijd (nog even springen na de rand) + jump-buffer
+  p.coyote = p.onGround ? 0.10 : Math.max(0,(p.coyote||0)-dt);
+  if(hit('arrowup','w',' ')) p.jumpBuf = 0.12; else p.jumpBuf = Math.max(0,(p.jumpBuf||0)-dt);
+
+  // lopen
+  let spd = 3.1*speedMult(p);
+  if(inWater) spd *= (p.charKey==='rinmi'?1.1:0.55);
+  if(p.dashT>0){ p.dashT -= dt; }
+  else {
+    if(down('arrowleft','a')){ p.vx = -spd; p.facing=-1; p.loopT += dt; }
+    else if(down('arrowright','d')){ p.vx = spd; p.facing=1; p.loopT += dt; }
+    else { p.vx *= 0.7; if(Math.abs(p.vx)<0.05) p.vx = 0; }
+  }
+  if(p.dashT>0){
+    // Kana-dash raakt vijanden
+    const rect = {x:p.x-6,y:p.y,w:p.w+12,h:p.h};
+    for(const e of game.enemies){
+      if(!e.dood && !e.dashGeraakt && overlap(rect,e)){
+        e.dashGeraakt = true; raakVijand(e, 22*dmgMult(p), p.facing);
+      }
+    }
+    if(game.boss && !game.boss.dood && overlap(rect,game.boss) && !game.boss.dashGeraakt){
+      game.boss.dashGeraakt = true; raakBaas(20*dmgMult(p));
+    }
+    game.parts.push({x:p.x+p.w/2,y:p.y+p.h/2,vx:-p.facing*2,vy:0,life:0.3,kleur:'#f55',size:5});
+  } else {
+    for(const e of game.enemies) e.dashGeraakt = false;
+    if(game.boss) game.boss.dashGeraakt = false;
+  }
+
+  // zwemmen / zwaartekracht
+  if(inWater && p.charKey==='rinmi'){
+    p.swim = true;
+    p.vy += GRAV*0.06*f;
+    if(down('arrowup','w',' ')) p.vy -= 0.5*f;
+    if(down('arrowdown','s')) p.vy += 0.35*f;
+    p.vy = Math.max(-3.5, Math.min(3.5, p.vy))*Math.pow(0.93,f);
+    p.waterT += dt;
+    if(p.waterT>0.4){ p.waterT=0;
+      if(p.hp<p.maxHp){ p.hp=Math.min(p.maxHp,p.hp+1.5);
+        game.parts.push({x:p.x+p.w/2,y:p.y,vx:0,vy:-1,life:0.5,kleur:'#8df',size:3}); }
+    }
+  } else {
+    p.swim = false;
+    if(inWater){
+      // andere meiden: water duwt ze omhoog en doet zeer
+      p.vy = Math.min(p.vy, 1.2); p.vy -= 0.3*f;
+      p.waterDmgT += dt;
+      if(p.waterDmgT>0.55){ p.waterDmgT=0; p.hp -= 4;
+        floater(p.x+p.w/2,p.y-8,'Brr!','#8cf');
+        if(p.hp<=0){ sterf(); return; } }
+      if(hit('arrowup','w',' ')) p.vy = -9;
+    } else {
+      p.vy += GRAV*f;
+      if(p.coyote>0 && p.jumpBuf>0){ p.vy = JUMP; p.coyote=0; p.jumpBuf=0; SFX.spring();
+        poef(p.x+p.w/2, p.y+p.h, '#e8f4ff', 5); }
+      // Qingfei zweeft
+      if(p.charKey==='qingfei' && !p.onGround && p.vy>1.4 && down('arrowup','w',' ')){
+        p.vy = 1.4; p.glijT += dt;
+        if(Math.floor(p.glijT*10)%3===0)
+          game.parts.push({x:p.x+p.w/2+(p.glijT*50%14)-7,y:p.y+p.h,vx:0,vy:1,life:0.3,kleur:'#cef',size:2});
+      }
+    }
+  }
+  p.vy = Math.min(p.vy, 14);
+  // door één-richtingsplatform zakken door ↓ vast te houden (kort venster)
+  if(down('arrowdown') && p.onGround && !inWater) p.dropT = 0.2;
+  p.dropThrough = (p.dropT||0) > 0;
+  p.dropT = Math.max(0,(p.dropT||0)-dt);
+  moveCollide(p, f);
+
+  // doornstruiken
+  const voetTile = tileAtPx(p.x+p.w/2, p.y+p.h-6);
+  if(voetTile==='^' && p.dorenT<=0){ p.dorenT = 0.8; raakSpeler(5, p.x+p.w/2 - p.facing*10); }
+  p.dorenT -= dt;
+
+  // acties
+  if(hit('x','j')) valAan();
+  if(hit('c','k')){ p.wapenIdx = (p.wapenIdx+1)%p.wapens.length;
+    floater(p.x+p.w/2,p.y-14,WAPENS[p.wapens[p.wapenIdx]].naam,'#fff'); }
+  if(hit('s','shift') && !inWater) gebruikGave();
+  if(hit('s','shift') && inWater && p.charKey!=='rinmi') gebruikGave();
+  if(hit('1')) eet();
+  if(hit('2')) drink();
+  if(hit('3')) gebruikLevensmiddel();
+
+  // honger
+  p.honger -= dt*100/240;
+  if(p.honger<35 && !game.hintHonger){ game.hintHonger=true;
+    floater(p.x+p.w/2,p.y-30, isTouch?'Je hebt honger! Tik op de 🍙-knop!':'Je hebt honger! Druk op 1 om te eten!','#fc6'); }
+  if(p.honger<=0){
+    p.honger = 0;
+    p.hongerT = (p.hongerT||0)+dt;
+    if(p.hongerT>1){ p.hongerT=0; p.hp -= 4;
+      floater(p.x+p.w/2,p.y-12,'Honger!','#f86');
+      if(p.hp<=0){ sterf(); return; } }
+  }
+
+  p.atkCd -= dt; p.atkAnim -= dt; p.gaveCd -= dt; p.invuln -= dt;
+
+  // voorwerpen oppakken
+  for(const it of game.items){
+    if(it.gepakt || it.type==='oma' || it.type==='uitgang' || it.type==='kooi') continue;
+    if(overlap(p,it)){
+      it.gepakt = true;
+      if(it.type==='munt'){ p.mun+=5; p.score+=10; floater(it.x,it.y-8,'+5 mun','#ffd700'); SFX.munt(); }
+      else if(it.type==='levens'){ p.inv.levens=Math.min(9,p.inv.levens+1);
+        floater(it.x,it.y-8,'Levensmiddel! +1','#9f9');
+        floater(it.x,it.y-26,'"Ooit heb je dit nodig," zei oma','#9f9'); SFX.munt(); }
+      else if(it.type==='eten'){ p.inv.eten=Math.min(9,p.inv.eten+1);
+        floater(it.x,it.y-8, ['Hangwa! +1','Yakgwa! +1','Tteokbokki! +1','Nashi-peer! +1'][(Math.random()*4)|0], '#fc6'); SFX.munt(); }
+      else if(it.type==='water'){ p.inv.water=Math.min(9,p.inv.water+1); floater(it.x,it.y-8,'Waterfles! +1','#6cf'); SFX.munt(); }
+      else if(it.type==='steen'){ game.level.stenen--; p.score+=25;
+        floater(it.x,it.y-8,'Trainingssteen!','#ddd'); SFX.munt(); geefXp(10); }
+    }
+  }
+
+  // oma — opent vanzelf als je dichtbij komt (werkt ook op touch), of opnieuw met E
+  const oma = game.items.find(i=>i.type==='oma');
+  if(oma){
+    const dichtbij = Math.abs((oma.x+14)-(p.x+p.w/2))<54;
+    if((dichtbij && !oma.gesproken) || (dichtbij && hit('e'))){
+      const i = oma.gesproken ? 1 : 0;
+      oma.gesproken = true;
+      game.dialog = { regels: omaRegels(i) };
+      game.state='dialog';
+      keysHit = {};
+    }
+  }
+
+  // uitgang
+  const uit = game.items.find(i=>i.type==='uitgang');
+  if(uit && overlap(p,uit) && doelKlaar()){
+    p.score += 250;
+    volgendeFase();
+    return;
+  }
+
+  // tas/statistieken
+  if(hit('tab','i')){ game.state='stats'; keysHit = {}; }
+
+  // camera
+  updateCamera(dt);
+}
+function doelKlaar(){
+  const L = game.level;
+  if(L.doel==='training') return L.stenen<=0 && L.poppen<=0;
+  if(L.doel==='kooien') return L.kooien<=0;
+  if(L.doel==='bereik') return true;
+  return false;
+}
+
+/* ---------------- Vijand-update ---------------- */
+function updateVijand(e, dt){
+  const p = game.player, f = dt*60;
+  e.flash -= dt; e.stun -= dt;
+  if(e.type==='pop'){ e.wob += dt*4; return; }
+  e.vy += GRAV*f;
+  const dist = Math.abs((e.x+e.w/2)-(p.x+p.w/2));
+  const zelfdeHoogte = Math.abs(e.y-p.y)<80;
+  if(e.type==='schutter'){
+    e.vy = Math.min(e.vy, 10);
+    moveCollide(e, f);
+    e.dir = p.x > e.x ? 1 : -1;
+    e.schietCd -= dt;
+    if(dist<440 && e.schietCd<=0){
+      e.schietCd = 2.2;
+      const dx = (p.x+p.w/2)-(e.x+e.w/2), dy = (p.y+10)-(e.y+10);
+      const len = Math.max(1,Math.hypot(dx,dy));
+      game.projs.push({type:'pijl', vriend:false, x:e.x+e.w/2, y:e.y+12, w:14, h:4,
+        vx:dx/len*5.5, vy:dy/len*5.5-1, grav:0.08, dmg:7, t:3});
+      beep(300,0.1,'triangle',0.03,200);
+    }
+  } else {
+    if(e.stun<=0){
+      const aggro = e.type==='generaal' ? 340 : 230;
+      if(dist<aggro && zelfdeHoogte) e.dir = p.x > e.x ? 1 : -1;
+      // niet van richels aflopen tijdens patrouille
+      const voorX = e.dir>0 ? e.x+e.w+4 : e.x-4;
+      if(e.onGround && !solidAt(voorX, e.y+e.h+6) && !(dist<aggro&&zelfdeHoogte)) e.dir *= -1;
+      if(e.muur) { e.dir = -e.muur; e.muur = 0; }
+      e.vx = e.dir * e.snel;
+    } else e.vx *= 0.85;
+    moveCollide(e, f);
+    // contact
+    if(overlap(e,p)) raakSpeler(e.dmg, e.x+e.w/2);
+  }
+}
+
+/* ---------------- Baas-update ---------------- */
+function updateBaas(dt){
+  const b = game.boss, p = game.player, f = dt*60;
+  if(b.dood){
+    game.bossDood -= dt;
+    if(game.bossDood<=0){ p.score+=500; volgendeFase(); }
+    return;
+  }
+  b.flash -= dt;
+  b.vy += GRAV*f;
+  b.dir = p.x > b.x ? 1 : -1;
+  const dist = Math.abs((b.x+b.w/2)-(p.x+p.w/2));
+  if(b.dashT>0){ b.dashT -= dt; b.vx = b.dir*6.5; }
+  else if(dist>150) b.vx = b.dir*1.3;
+  else b.vx *= 0.8;
+  moveCollide(b, f);
+  // schaduwbollen
+  b.orbCd -= dt;
+  if(b.orbCd<=0){
+    b.orbCd = 2.4;
+    const dx = (p.x+p.w/2)-(b.x+b.w/2), dy = (p.y+14)-(b.y+20);
+    const len = Math.max(1,Math.hypot(dx,dy));
+    game.projs.push({type:'orb', vriend:false, x:b.x+b.w/2, y:b.y+20, w:16, h:16,
+      vx:dx/len*4.5, vy:dy/len*4.5, grav:0, dmg:12, t:3.5});
+    beep(110,0.2,'sawtooth',0.05,70);
+  }
+  // dash
+  b.dashCd -= dt;
+  if(b.dashCd<=0 && Math.abs(b.y-p.y)<60){ b.dashCd = 6; b.dashT = 0.6; schud(7); SFX.boss();
+    floater(b.x+b.w/2, b.y-16, '"Voel mijn schaduw!"', '#d9f'); }
+  // hulptroepen
+  if(b.hp < b.maxHp*0.66 && !b.opgeroepen.p66){
+    b.opgeroepen.p66 = true; roepKrijgers(b);
+  }
+  if(b.hp < b.maxHp*0.33 && !b.opgeroepen.p33){
+    b.opgeroepen.p33 = true; roepKrijgers(b);
+  }
+  if(overlap(b,p)) raakSpeler(15, b.x+b.w/2);
+}
+function roepKrijgers(b){
+  floater(b.x+b.w/2, b.y-16, '"Soldaten! Pak ze!"', '#d9f');
+  for(const d of [-60, 60]){
+    const e = maakVijand('krijger', b.x+d, b.y+b.h);
+    poef(e.x+12, e.y+20, '#a5f', 10);
+    game.enemies.push(e);
+  }
+}
+
+/* ---------------- Projectielen, valstrikken, deeltjes ---------------- */
+function updateProjs(dt){
+  const f = dt*60, p = game.player;
+  for(const pr of game.projs){
+    pr.t -= dt;
+    pr.vy += (pr.grav||0)*f;
+    pr.x += pr.vx*f; pr.y += pr.vy*f;
+    if(pr.t<=0){ pr.weg=true; continue; }
+    const c = tileAtPx(pr.x+pr.w/2, pr.y+pr.h/2);
+    if(solidChar(c)){ pr.weg=true; poef(pr.x,pr.y,'#ccc',4); continue; }
+    if(pr.vriend){
+      for(const e of game.enemies){
+        if(e.dood) continue;
+        if(pr.type==='golf' && pr.geraakt.includes(e)) continue;
+        if(overlap(pr,e)){
+          raakVijand(e, pr.dmg, Math.sign(pr.vx));
+          if(pr.type==='golf') pr.geraakt.push(e); else { pr.weg=true; break; }
+        }
+      }
+      if(!pr.weg && game.boss && !game.boss.dood && overlap(pr,game.boss)){
+        if(pr.type==='golf'){ if(!pr.geraakt.includes(game.boss)){ raakBaas(pr.dmg); pr.geraakt.push(game.boss); } }
+        else { raakBaas(pr.dmg); pr.weg=true; }
+      }
+      if(!pr.weg){
+        for(const it of game.items){
+          if(it.type==='kooi' && !it.open && overlap(pr,it)){ raakKooi(it); if(pr.type!=='golf') pr.weg=true; break; }
+        }
+      }
+    } else {
+      if(overlap(pr,p)){ raakSpeler(pr.dmg, pr.x); pr.weg=true; }
+    }
+  }
+  game.projs = game.projs.filter(pr=>!pr.weg);
+  // valstrikken
+  for(const tr of game.traps){
+    for(const e of game.enemies){
+      if(!e.dood && overlap(tr,e)){
+        tr.weg = true; raakVijand(e, 32*dmgMult(p), 0);
+        poef(tr.x+13,tr.y,'#9d6',10);
+        break;
+      }
+    }
+    if(!tr.weg && game.boss && !game.boss.dood && overlap(tr,game.boss)){
+      tr.weg = true; raakBaas(32*dmgMult(p)); poef(tr.x+13,tr.y,'#9d6',10);
+    }
+  }
+  game.traps = game.traps.filter(t=>!t.weg);
+  // tijdelijke rotsen
+  for(const tr of game.tempRocks){
+    tr.t -= dt;
+    if(tr.t<=0 && tile(tr.tx,tr.ty)==='R'){
+      game.level.grid[tr.ty][tr.tx]=' ';
+      poef(tr.tx*TILE+16, tr.ty*TILE+16, '#b97', 6);
+    }
+  }
+  game.tempRocks = game.tempRocks.filter(t=>t.t>0);
+  // deeltjes & zwevende teksten
+  for(const pa of game.parts){ pa.life-=dt; pa.x+=pa.vx*f; pa.y+=pa.vy*f; pa.vy+=0.06*f; }
+  game.parts = game.parts.filter(pa=>pa.life>0);
+  for(const fl of game.floaters){ fl.t-=dt; fl.y-=0.5*f; }
+  game.floaters = game.floaters.filter(fl=>fl.t>0);
+  for(const gv of game.gevangenen){ gv.t-=dt; gv.x-=1.6*f; }
+  game.gevangenen = game.gevangenen.filter(g=>g.t>0);
+}
+
+/* ---------------- Paardrit ---------------- */
+function bouwRit(){
+  const obs=[]; let d=700;
+  const pat=[[420,'rots'],[380,'hek'],[300,'struik'],[520,'rots'],[340,'hek'],
+             [460,'struik'],[300,'rots'],[420,'hek'],[360,'struik'],[480,'rots'],
+             [320,'hek'],[440,'struik']];
+  for(const [gap,t] of pat){ d+=gap; obs.push({x:d, type:t}); }
+  const coins=[];
+  for(let i=0;i<13;i++){
+    const cxp = 950+i*340;
+    for(let j=0;j<3;j++) coins.push({x:cxp+j*42, y: j===1 ? 360 : 396, gepakt:false});
+  }
+  game.camX = 0; game.camY = 0; // floaters/deeltjes in schermcoördinaten
+  game.parts = []; game.floaters = [];
+  return { dist:0, snelheid:5.2, y:0, vy:0, onG:true, obs, coins,
+    finish:d+800, inv:0, animT:0 };
+}
+function updateRit(dt){
+  const r = game.ride, p = game.player, f = dt*60;
+  r.animT += dt;
+  r.dist += r.snelheid*f;
+  r.inv -= dt;
+  // springen
+  if(r.onG && hit('arrowup','w',' ')){ r.vy = -12; r.onG = false; SFX.spring(); }
+  if(!r.onG){
+    r.vy += 0.55*f; r.y += r.vy*f;
+    if(r.y>=0){ r.y=0; r.vy=0; r.onG=true; }
+  }
+  // eten kan ook op het paard
+  if(hit('1')) eet();
+  if(hit('2')) drink();
+  if(hit('3')) gebruikLevensmiddel();
+  // honger
+  p.honger -= dt*100/240;
+  if(p.honger<=0){ p.honger=0; p.hongerT=(p.hongerT||0)+dt;
+    if(p.hongerT>1){ p.hongerT=0; p.hp-=4; if(p.hp<=0){ sterf(); return; } } }
+  // botsing met obstakels (paard staat op schermx 180)
+  const horseX = 180, horseW = 70;
+  for(const o of r.obs){
+    const sx = o.x - r.dist + horseX;
+    if(sx > horseX-40 && sx < horseX+horseW && r.y > -55 && r.inv<=0){
+      r.inv = 1.2; p.hp -= 8; p.score = Math.max(0,p.score-5);
+      floater(horseX+30, 380, 'Boem! Au!', '#f88'); SFX.au();
+      poef(horseX+40, 420, '#cb9', 8);
+      if(p.hp<=0){ sterf(); return; }
+    }
+  }
+  // munten
+  for(const cn of r.coins){
+    const sx = cn.x - r.dist + horseX;
+    if(!cn.gepakt && sx>horseX && sx<horseX+horseW){
+      const horseTopY = 420 - 56 + r.y;
+      if(Math.abs(cn.y - horseTopY) < 60){
+        cn.gepakt = true; p.mun += 5; p.score += 10;
+        floater(sx, cn.y-10, '+5 mun', '#ffd700'); SFX.munt();
+      }
+    }
+  }
+  // finish
+  if(r.dist >= r.finish){ p.score += 250; volgendeFase(); }
+}
+
+/* ---------------- Flow ---------------- */
+function volgendeFase(){
+  game.flowIdx++;
+  const item = FLOW[game.flowIdx];
+  if(!item){ game.state='victory'; return; }
+  startFase(item);
+}
+function startFase(item){
+  keysHit = {};
+  if(item.type==='story'){
+    game.storySlides = VERHALEN[item.key]; game.storyIdx = 0; game.state='story';
+  } else if(item.type==='level'){
+    laadLevel(item.key);
+  } else if(item.type==='select'){
+    game.selIdx = 0; game.state='select';
+  } else if(item.type==='weapons'){
+    game.wapenSel = []; game.state='weapons';
+  } else if(item.type==='shop'){
+    game.state='shop';
+  } else if(item.type==='ride'){
+    game.ride = bouwRit(); game.state='ride';
+  } else if(item.type==='cutscene'){
+    startCutscene(item.key);
+  } else if(item.type==='victory'){
+    const p = game.player;
+    if(p.score>game.hi){ game.hi=p.score; localStorage.setItem('rinmi_hi',''+game.hi); }
+    game.state='victory';
+  }
+}
+function startSpel(){
+  game.player = nieuwSpeler('rinmi'); // proloog speel je als jonge Rinmi
+  game.flowIdx = -1;
+  game.hintHonger = false;
+  volgendeFase();
+}
+function kiesPersonage(key){
+  const oud = game.player;
+  const p = nieuwSpeler(key);
+  // voortgang meenemen uit de proloog
+  p.score = oud.score; p.mun = oud.mun; p.xp = oud.xp; p.niveau = oud.niveau;
+  p.levens = oud.levens;
+  // elk niveau uit de proloog geeft de nieuwe heldin wat extra hartkracht
+  p.maxHp += (p.niveau-1)*10; p.hp = p.maxHp;
+  game.player = p;
+  volgendeFase();
+}
+
+/* ---------------- Winkel ---------------- */
+const WINKEL = [
+  { naam:'Etenspakket',  prijs:20, info:'Honger +55 (tegen het doodgaan!)', fn:p=>{p.inv.eten=Math.min(9,p.inv.eten+1);} },
+  { naam:'Waterfles',    prijs:15, info:'+30 HP', fn:p=>{p.inv.water=Math.min(9,p.inv.water+1);} },
+  { naam:'Levensmiddel', prijs:40, info:'Helemaal beter genezen', fn:p=>{p.inv.levens=Math.min(9,p.inv.levens+1);} },
+  { naam:'Hartversterker', prijs:60, info:'+10 max HP, voor altijd', fn:p=>{p.maxHp+=10; p.hp+=10;} },
+  { naam:'Wapensmid',    prijs:80, info:'+10% wapenschade, voor altijd', fn:p=>{p.smid++;} },
+];
+function koop(i){
+  const p = game.player, w = WINKEL[i];
+  if(p.mun >= w.prijs){ p.mun -= w.prijs; w.fn(p); SFX.koop(); }
+  else SFX.fout();
+}
+
+/* ============================================================
+   TEKENEN
+   ============================================================ */
+function rect(x,y,w,h,kleur){ cx.fillStyle=kleur; cx.fillRect(Math.round(x),Math.round(y),Math.round(w),Math.round(h)); }
+function rpath(x,y,w,h,r){
+  r = Math.min(r, w/2, h/2);
+  cx.beginPath();
+  cx.moveTo(x+r,y); cx.arcTo(x+w,y,x+w,y+h,r); cx.arcTo(x+w,y+h,x,y+h,r);
+  cx.arcTo(x,y+h,x,y,r); cx.arcTo(x,y,x+w,y,r); cx.closePath();
+}
+function rrect(x,y,w,h,r,fill,stroke,lw){
+  rpath(x,y,w,h,r);
+  if(fill){ cx.fillStyle=fill; cx.fill(); }
+  if(stroke){ cx.strokeStyle=stroke; cx.lineWidth=lw||2; cx.stroke(); }
+}
+function glow(x,y,r,kleur){
+  const g=cx.createRadialGradient(x,y,0,x,y,r);
+  g.addColorStop(0,kleur); g.addColorStop(1,'rgba(0,0,0,0)');
+  cx.fillStyle=g; cx.beginPath(); cx.arc(x,y,r,0,7); cx.fill();
+}
+function tekst(t,x,y,size,kleur,align,vet){
+  cx.font = (vet?'bold ':'')+size+'px "Trebuchet MS",Verdana,sans-serif';
+  cx.textAlign = align||'left';
+  if(size>=20){ cx.fillStyle='rgba(0,0,0,0.35)'; cx.fillText(t,x+2,y+2); }
+  cx.fillStyle = kleur||'#fff';
+  cx.fillText(t,x,y);
+  cx.textAlign = 'left';
+}
+function knop(x,y,w,h,label,fn,actief){
+  if(actief) glow(x+w/2, y+h/2, w*0.62, 'rgba(120,190,255,0.18)');
+  const g = cx.createLinearGradient(0,y,0,y+h);
+  if(actief){ g.addColorStop(0,'#4f86c6'); g.addColorStop(1,'#2f5e98'); }
+  else { g.addColorStop(0,'#33455e'); g.addColorStop(1,'#222f44'); }
+  rrect(x,y,w,h,12,g, actief?'#bfe0ff':'#5b7493', 2);
+  rrect(x+3,y+3,w-6,h*0.42,8,'rgba(255,255,255,0.10)');
+  tekst(label, x+w/2, y+h/2+5, 15, '#fff', 'center', true);
+  uiButtons.push({x,y,w,h,fn});
+}
+
+/* ---------------- Achtergronden ---------------- */
+const THEMAS = {
+  dorp:   { lucht:['#aee3f5','#e8f7e0'], heuvel:'#9ccc7a', grond:'#7a5230', gras:'#6aa84f' },
+  eiland: { lucht:['#8ed4f0','#d8f0fa'], heuvel:'#7ab86a', grond:'#8a6240', gras:'#5a9e4a' },
+  grot:   { lucht:['#16121e','#241c30'], heuvel:'#1e1828', grond:'#4a4252', gras:'#5a5266' },
+  arena:  { lucht:['#e8865a','#f5c06a'], heuvel:'#7a4a3a', grond:'#6a5a50', gras:'#8a7a6a' },
+};
+function wolk(x,y,s,kleur){
+  cx.fillStyle=kleur;
+  cx.beginPath();
+  cx.ellipse(x,y,38*s,20*s,0,0,7);
+  cx.ellipse(x+34*s,y+6*s,28*s,16*s,0,0,7);
+  cx.ellipse(x-32*s,y+7*s,26*s,15*s,0,0,7);
+  cx.ellipse(x+6*s,y-12*s,26*s,17*s,0,0,7);
+  cx.fill();
+}
+function tekenLucht(theme){
+  const t = THEMAS[theme];
+  const gr = cx.createLinearGradient(0,0,0,H);
+  gr.addColorStop(0,t.lucht[0]); gr.addColorStop(1,t.lucht[1]);
+  cx.fillStyle = gr; cx.fillRect(0,0,W,H);
+  if(theme==='dorp'||theme==='eiland'){
+    // zon met halo
+    const zx = 786-game.camX*0.04, zy = 96;
+    glow(zx,zy,150,'rgba(255,240,180,0.55)');
+    cx.fillStyle='#fff3c4'; cx.beginPath(); cx.arc(zx,zy,40,0,7); cx.fill();
+    cx.fillStyle='#ffe680'; cx.beginPath(); cx.arc(zx,zy,33,0,7); cx.fill();
+    // verre bergen
+    cx.fillStyle = theme==='eiland'?'#9fbfd6':'#b9d0e0';
+    for(let i=0;i<6;i++){ const bx=((i*360-game.camX*0.12)%(W+460))-230;
+      cx.beginPath(); cx.moveTo(bx,330); cx.lineTo(bx+180,170); cx.lineTo(bx+360,330); cx.fill(); }
+    // wolken
+    for(let i=0;i<4;i++){ const wx=((i*300-game.camX*0.18)%(W+320))-160;
+      wolk(wx+80,96+(i%2)*44,0.7+(i%2)*0.35,'rgba(255,255,255,0.92)'); }
+    // heuvels — drie lagen met gradient
+    for(let L=0;L<3;L++){
+      const par=[0.22,0.34,0.5][L], base=[392,432,470][L];
+      const hg=cx.createLinearGradient(0,base-90,0,H);
+      const c1=['#bfe09a','#9fd07a','#7ec060'][L], c2=['#86b86a','#6aa84f','#5a9e4a'][L];
+      hg.addColorStop(0,c1); hg.addColorStop(1,c2);
+      cx.fillStyle=hg;
+      for(let i=0;i<5;i++){ const hx=((i*330-game.camX*par)%(W+440))-220;
+        cx.beginPath(); cx.ellipse(hx+170,base+90,200,150,0,Math.PI,0); cx.fill(); }
+    }
+    if(theme==='eiland'){
+      const wg=cx.createLinearGradient(0,452,0,H);
+      wg.addColorStop(0,'rgba(120,200,235,0.55)'); wg.addColorStop(1,'rgba(60,150,210,0.65)');
+      cx.fillStyle=wg; cx.fillRect(0,452,W,H-452);
+      cx.fillStyle='rgba(255,255,255,0.25)';
+      for(let i=0;i<14;i++){ const sx=((i*120-game.camX*0.4+game.tijd*16)%(W+120))-60;
+        rect(sx,470+(i%3)*20,40,2,'rgba(255,255,255,0.3)'); }
+    }
+  } else if(theme==='grot'){
+    cx.fillStyle='rgba(20,14,30,0.5)';
+    // verre stalactieten (parallax laag 1)
+    cx.fillStyle='#1c1628';
+    for(let i=0;i<10;i++){ const sx=((i*180-game.camX*0.25)%(W+200))-100;
+      cx.beginPath(); cx.moveTo(sx,0); cx.lineTo(sx+34,0); cx.lineTo(sx+17,70+(i%3)*30); cx.fill(); }
+    // dichtbij stalactieten
+    cx.fillStyle='#2e2440';
+    for(let i=0;i<12;i++){ const sx=((i*150-game.camX*0.45)%(W+170))-85;
+      cx.beginPath(); cx.moveTo(sx,0); cx.lineTo(sx+26,0); cx.lineTo(sx+13,52+(i%3)*28); cx.fill(); }
+    // glimmende kristallen
+    for(let i=0;i<7;i++){ const sx=((i*240+60-game.camX*0.5)%(W+220))-110, sy=440+(i%2)*10;
+      glow(sx+9,sy+10,26,'rgba(140,110,250,0.4)');
+      cx.fillStyle='#7a5af0'; cx.beginPath(); cx.moveTo(sx,sy+22); cx.lineTo(sx+9,sy-4); cx.lineTo(sx+18,sy+22); cx.fill();
+      cx.fillStyle='#b9a3ff'; cx.beginPath(); cx.moveTo(sx+5,sy+16); cx.lineTo(sx+9,sy+2); cx.lineTo(sx+12,sy+16); cx.fill(); }
+  } else if(theme==='arena'){
+    // ondergaande zon met halo
+    const zx=150-game.camX*0.04, zy=120;
+    glow(zx,zy,180,'rgba(255,150,80,0.5)');
+    cx.fillStyle='#ffd08a'; cx.beginPath(); cx.arc(zx,zy,46,0,7); cx.fill();
+    cx.fillStyle='#ffb060'; cx.beginPath(); cx.arc(zx,zy,36,0,7); cx.fill();
+    // wolkenbanden
+    for(let i=0;i<4;i++){ const wx=((i*280-game.camX*0.12)%(W+300))-150;
+      wolk(wx+90,120+(i%2)*40,0.8,'rgba(255,180,130,0.45)'); }
+    // paleissilhouet
+    const px=420-game.camX*0.22;
+    cx.fillStyle='#3a2028';
+    rect(px,250,340,210,'#3a2028');
+    cx.beginPath(); cx.moveTo(px-34,250); cx.lineTo(px+170,184); cx.lineTo(px+374,250); cx.fill();
+    cx.beginPath(); cx.moveTo(px+120,184); cx.lineTo(px+170,150); cx.lineTo(px+220,184); cx.fill();
+    cx.fillStyle='#241216';
+    rect(px+70,320,40,60,'#241216'); rect(px+250,320,40,60,'#241216');
+    // gloeiende ramen
+    cx.fillStyle='rgba(255,160,80,0.5)';
+    for(let i=0;i<6;i++) rect(px+40+i*48,290,16,20,'rgba(255,160,80,0.4)');
+  }
+}
+function tekenTegels(){
+  const L = game.level, t = THEMAS[L.theme];
+  const grasTop = L.theme==='grot' ? '#5a5266' : (L.theme==='arena' ? '#8a7a6a' : '#6aae4d');
+  const grasTop2 = L.theme==='grot' ? '#6a6276' : (L.theme==='arena' ? '#9a8a78' : '#7ec05c');
+  const x0 = Math.floor(game.camX/TILE), x1 = Math.min(L.w-1, x0+Math.ceil(W/TILE)+1);
+  for(let ty=0; ty<ROWS; ty++){
+    for(let tx=x0; tx<=x1; tx++){
+      const c = L.grid[ty][tx];
+      if(c===' ') continue;
+      const sx = tx*TILE-game.camX, sy = ty*TILE-game.camY;
+      if(c==='#'){
+        const bovenLucht = tile(tx,ty-1)!=='#' && tile(tx,ty-1)!=='=' && tile(tx,ty-1)!=='R';
+        // aarde met verticale gradient
+        const g=cx.createLinearGradient(0,sy,0,sy+TILE);
+        g.addColorStop(0, t.grond); g.addColorStop(1, L.theme==='grot'?'#352f3e':'#5f3f24');
+        cx.fillStyle=g; cx.fillRect(sx,sy,TILE,TILE);
+        // korreltjes
+        cx.fillStyle='rgba(0,0,0,0.10)';
+        cx.fillRect(sx+((tx*7)%24), sy+10+((ty*5)%14), 6, 4);
+        cx.fillStyle='rgba(255,255,255,0.05)';
+        cx.fillRect(sx+((tx*11)%22), sy+18, 4, 3);
+        if(bovenLucht){
+          rect(sx,sy,TILE,8,grasTop);
+          rect(sx,sy,TILE,3,grasTop2);
+          // grassprietjes / kristalrandje
+          cx.strokeStyle=grasTop2; cx.lineWidth=2;
+          for(let i=0;i<3;i++){ const gx=sx+5+i*10+((tx)%2)*3;
+            cx.beginPath(); cx.moveTo(gx,sy); cx.lineTo(gx+(i-1),sy-5); cx.stroke(); }
+        }
+      } else if(c==='='){
+        // houten plank-platform
+        rrect(sx,sy+3,TILE,13,3,'#9a6230');
+        rect(sx,sy+3,TILE,3,'#b88048');
+        cx.strokeStyle='rgba(80,50,20,0.5)'; cx.lineWidth=1;
+        cx.beginPath(); cx.moveTo(sx+10,sy+6); cx.lineTo(sx+10,sy+15); cx.moveTo(sx+22,sy+6); cx.lineTo(sx+22,sy+15); cx.stroke();
+        rect(sx+4,sy+16,4,7,'#6a4220'); rect(sx+24,sy+16,4,7,'#6a4220');
+      } else if(c==='R'){
+        glow(sx+16,sy+18,20,'rgba(0,0,0,0.12)');
+        const g=cx.createLinearGradient(0,sy,0,sy+TILE);
+        g.addColorStop(0,'#b2a08c'); g.addColorStop(1,'#7d6c5a');
+        cx.fillStyle=g; cx.beginPath(); cx.ellipse(sx+16,sy+17,15,15,0,0,7); cx.fill();
+        cx.fillStyle='rgba(255,255,255,0.35)';
+        cx.beginPath(); cx.ellipse(sx+11,sy+11,5,4,0,0,7); cx.fill();
+        cx.strokeStyle='rgba(60,45,30,0.4)'; cx.lineWidth=1;
+        cx.beginPath(); cx.moveTo(sx+8,sy+20); cx.lineTo(sx+16,sy+16); cx.lineTo(sx+24,sy+21); cx.stroke();
+      } else if(c==='W'){
+        const top = tile(tx,ty-1)!=='W';
+        const g=cx.createLinearGradient(0,sy,0,sy+TILE*2);
+        g.addColorStop(0,'rgba(90,180,235,0.78)'); g.addColorStop(1,'rgba(40,110,180,0.85)');
+        cx.fillStyle=g; cx.fillRect(sx,sy,TILE,TILE);
+        // caustics
+        cx.fillStyle='rgba(200,235,255,0.18)';
+        const cw=Math.sin(game.tijd*2+tx*0.7)*6;
+        cx.fillRect(sx+4+cw, sy+14, 10, 2); cx.fillRect(sx+18-cw, sy+22, 8, 2);
+        if(top){
+          const golf=Math.sin(game.tijd*3+tx)*2;
+          rect(sx,sy+golf,TILE,4,'rgba(220,245,255,0.85)');
+          cx.fillStyle='rgba(255,255,255,0.6)';
+          rect(sx+((tx*9)%26),sy+golf-1,5,2,'rgba(255,255,255,0.6)');
+        }
+      } else if(c==='^'){
+        cx.fillStyle='#3a6e2a';
+        cx.beginPath(); cx.ellipse(sx+16,sy+26,15,8,0,0,7); cx.fill();
+        cx.fillStyle='#2a4e1a';
+        for(let i=0;i<4;i++){ cx.beginPath();
+          cx.moveTo(sx+5+i*7,sy+24); cx.lineTo(sx+8+i*7,sy+10); cx.lineTo(sx+11+i*7,sy+24); cx.fill(); }
+      }
+    }
+  }
+}
+
+/* ---------------- Sprites ---------------- */
+function tekenHeld(p, sx, sy){
+  const c = CHARS[p.charKey];
+  const knipper = p.invuln>0 && Math.floor(game.tijd*12)%2===0;
+  const hh = p.h;
+  const hsh = p.charKey.length*0.41;
+  const beweegt = p.onGround && Math.abs(p.vx)>0.5;
+  const loop = beweegt ? Math.sin(p.loopT*14)*4 : 0;
+  const br = (!beweegt && p.onGround) ? Math.sin(game.tijd*2.6+hsh)*1.0 : 0; // ademen
+  const zweef = (!p.onGround && p.charKey==='qingfei' && p.vy>0) ? 1 : 0;
+  const haarSway = clamp(-(p.vx||0)*0.35, -3, 3) + (zweef?2:0);
+  // grondschaduw
+  cx.save();
+  cx.globalAlpha = 0.20; cx.fillStyle='#000';
+  cx.beginPath(); cx.ellipse(sx+p.w/2, sy+hh+1, p.w*0.6, 4, 0, 0, 7); cx.fill();
+  cx.restore();
+  if(knipper) return;
+  cx.save();
+  cx.translate(sx+p.w/2, sy);
+  cx.scale(p.facing,1);
+  // rugzak (Rinmi) — overlevingsspullen
+  if(p.charKey==='rinmi'){ rrect(-15,13,9,18,3,'#5a3a1c'); rect(-13,16,6,4,'#7a5a3c'); rect(-14,24,7,2,'#3a2410'); }
+  // benen
+  rect(-8,hh-16+Math.min(0,loop),6,16-Math.min(0,loop),c.pak);
+  rect(2,hh-16+Math.min(0,-loop),6,16-Math.min(0,-loop),c.pak);
+  // voeten: Rinmi blote voeten, rest laarsjes
+  const voet = p.charKey==='rinmi' ? c.huid : '#3a2a1a';
+  rect(-9,hh-4,8,4,voet); rect(1,hh-4,8,4,voet);
+  // romp met schaduwzijde
+  rrect(-9,12,18,hh-26,4,c.pak2);
+  cx.globalAlpha=0.18; rect(2,12,7,hh-26,'#000'); cx.globalAlpha=1;
+  if(p.charKey==='rinmi'){ rect(-7,18,4,3,c.pak); rect(3,24,4,3,c.pak); rect(-2,30,3,3,c.pak); }
+  if(p.charKey==='kana'){ rect(-9,22,18,4,'#8a1a1a'); rect(-5,21,2,6,'#ccc'); rect(1,21,2,6,'#ccc'); }
+  if(p.charKey==='yuna'){ rect(-7,20,5,5,c.pak); rect(2,20,5,5,c.pak); rect(-7,28,5,5,c.pak); }
+  if(p.charKey==='qingfei'){ cx.fillStyle='#fff'; cx.beginPath();
+    cx.moveTo(0,20); cx.lineTo(-6,27); cx.lineTo(6,27); cx.fill(); }
+  // ketting (Rinmi & Seojin) — het erfstuk
+  if(p.charKey==='rinmi'||p.charKey==='seojin'){ rect(-1,13,3,3,'#ffd700'); }
+  // armen
+  const armZwaai = p.atkAnim>0 ? -7 : 0;
+  rect(-12,14+br,4,14,c.pak2); rect(8,14+br+armZwaai,4,14,c.pak2);
+  rect(-12,28+br,4,3,c.huid); rect(8,28+br+armZwaai,4,3,c.huid);
+  // hoofd
+  rrect(-7,0+br,14,13,3,c.huid);
+  cx.globalAlpha=0.12; rect(2,1+br,5,12,'#000'); cx.globalAlpha=1;
+  // haar (met sway)
+  cx.fillStyle = c.haar;
+  if(p.charKey==='rinmi'){
+    rect(-8,-2+br,16,5,c.haar); rect(-8,0+br,3,8,c.haar);
+    rect(5,0+br,2,9,c.haar);
+    for(let i=0;i<5;i++) rect(-11+haarSway*(i*0.3),2+br+i*5,4,4,c.haar); // vlecht op de rug
+  } else if(p.charKey==='kana'){
+    rect(-8,-2+br,16,5,c.haar); rect(-12+haarSway,-4+br,5,13,c.haar);
+  } else if(p.charKey==='yuna'){
+    rect(-8,-3+br,16,7,c.haar); rect(-8,2+br,3,6,c.haar); rect(5,2+br,3,6,c.haar);
+  } else if(p.charKey==='qingfei'){
+    rect(-8,-2+br,16,5,c.haar); rect(-3,-7+br,8,6,c.haar);
+  } else if(p.charKey==='seojin'){
+    rect(-8,-2+br,16,5,c.haar); rect(-10+haarSway,0+br,3,12,c.haar);
+    rect(-7,1+br,14,3,'#c44');
+  }
+  // ogen: donkerbruin met vurig stipje (af en toe knipperen)
+  const blink = ((game.tijd+hsh) % 3.4) < 0.12;
+  if(blink){ rect(0,7+br,5,1.5,'#241509'); }
+  else { rect(1,4+br,3,4,'#241509'); rect(2,5+br,1,1,'#ff8c1a'); }
+  // wapen bij aanval
+  if(p.atkAnim>0){
+    const wk = p.wapens[p.wapenIdx];
+    if(wk==='zwaard'){ rect(11,7,4,27,'#e6ecf4'); rect(11,7,2,27,'#fff'); rect(10,31,6,5,'#8a5a30'); }
+    else if(wk==='zwaaibanden'){
+      cx.strokeStyle='#e6e6e6'; cx.lineWidth=2;
+      cx.beginPath(); cx.arc(14,20,12,0,7); cx.stroke();
+      cx.beginPath(); cx.arc(-16,22,12,0,7); cx.stroke();
+      cx.fillStyle='#bbb'; cx.beginPath(); cx.arc(14,8,2,0,7); cx.arc(-16,10,2,0,7); cx.fill();
+    }
+    else if(wk==='boog'){ cx.strokeStyle='#8a5a30'; cx.lineWidth=3;
+      cx.beginPath(); cx.arc(12,20,12,-1.2,1.2); cx.stroke();
+      cx.strokeStyle='#eee'; cx.lineWidth=1; cx.beginPath(); cx.moveTo(12,9); cx.lineTo(12,31); cx.stroke(); }
+    else if(wk==='katapult'){ rect(10,12,4,14,'#8a5a30'); rect(8,8,3,8,'#8a5a30'); rect(15,8,3,8,'#8a5a30'); }
+  }
+  cx.restore();
+}
+function tekenVijand(e, sx, sy){
+  cx.save(); cx.globalAlpha=0.18; cx.fillStyle='#000';
+  cx.beginPath(); cx.ellipse(sx+e.w/2, sy+e.h+1, e.w*0.6, 4, 0, 0, 7); cx.fill(); cx.restore();
+  cx.save();
+  cx.translate(sx+e.w/2, sy);
+  cx.scale(e.dir<0?-1:1,1);
+  const fl = e.flash>0;
+  if(e.type==='pop'){
+    const wob = Math.sin(e.wob)*2;
+    rect(-2,e.h-8,4,8,'#6a4a2a');
+    rect(-8+wob,4,16,e.h-14,fl?'#fff':'#d8c080');
+    rect(-6+wob,0,12,10,fl?'#fff':'#e8d090');
+    rect(-3+wob,3,2,2,'#555'); rect(2+wob,3,2,2,'#555');
+    cx.restore(); return;
+  }
+  if(e.type==='generaal'){
+    rect(-10,14,20,e.h-26,fl?'#fff':'#3a3a44');
+    rect(-12,12,24,5,'#8a2a2a');
+    rect(-8,e.h-14,6,14,'#2a2a30'); rect(2,e.h-14,6,14,'#2a2a30');
+    rect(-8,0,16,13,fl?'#fff':'#555f6a');
+    rect(-9,-2,18,5,'#444c56'); rect(-2,-9,4,8,'#c43030'); // rode pluim
+    rect(2,4,3,3,'#ffb030');
+    rect(-14,14,5,16,'#3a3a44'); rect(9,14,5,16,'#3a3a44');
+  } else {
+    rect(-8,12,16,e.h-24,fl?'#fff':'#46505a');
+    rect(-7,e.h-12,5,12,'#2a2a30'); rect(2,e.h-12,5,12,'#2a2a30');
+    rect(-7,0,14,12,fl?'#fff':'#5a646e');
+    rect(-8,-2,16,4,'#444c56'); rect(-1,-5,2,4,'#444c56');
+    rect(2,4,3,3,'#ffb030');
+    rect(-11,13,4,13,'#46505a'); rect(7,13,4,13,'#46505a');
+    if(e.type==='schutter'){
+      cx.strokeStyle='#8a5a30'; cx.lineWidth=3;
+      cx.beginPath(); cx.arc(12,18,12,-1.3,1.3); cx.stroke();
+      cx.strokeStyle='#ddd'; cx.lineWidth=1;
+      cx.beginPath(); cx.moveTo(12,6); cx.lineTo(12,30); cx.stroke();
+    }
+  }
+  cx.restore();
+}
+function tekenBaas(b, sx, sy){
+  if(!b.dood){ cx.save(); cx.globalAlpha=0.22; cx.fillStyle='#000';
+    cx.beginPath(); cx.ellipse(sx+b.w/2, sy+b.h+1, b.w*0.55, 6, 0, 0, 7); cx.fill(); cx.restore();
+    glow(sx+b.w/2, sy+b.h*0.5, b.w, 'rgba(120,40,200,0.18)'); }
+  cx.save();
+  cx.translate(sx+b.w/2, sy);
+  cx.scale(b.dir<0?-1:1,1);
+  const fl = b.flash>0;
+  let schaal = 1;
+  if(b.dood){ schaal = Math.max(0.05, game.bossDood/2.2); cx.scale(schaal,schaal); }
+  // cape
+  cx.fillStyle = '#2a1438';
+  cx.beginPath(); cx.moveTo(-20,16); cx.lineTo(-30,b.h); cx.lineTo(-6,b.h-6); cx.fill();
+  // lijf
+  rect(-18,18,36,b.h-34,fl?'#fff':'#5a2a7a');
+  rect(-14,b.h-18,10,18,'#3a1a50'); rect(6,b.h-18,10,18,'#3a1a50');
+  // armen met klauwen
+  rect(-26,22,8,26,'#5a2a7a'); rect(18,22,8,26,'#5a2a7a');
+  rect(-27,48,3,6,'#caa'); rect(-23,48,3,6,'#caa');
+  rect(19,48,3,6,'#caa'); rect(23,48,3,6,'#caa');
+  // hoofd met horens
+  rect(-12,0,24,18,fl?'#fff':'#6a3a8a');
+  cx.fillStyle='#3a1a50';
+  cx.beginPath(); cx.moveTo(-12,2); cx.lineTo(-22,-12); cx.lineTo(-7,-2); cx.fill();
+  cx.beginPath(); cx.moveTo(12,2); cx.lineTo(22,-12); cx.lineTo(7,-2); cx.fill();
+  // gloeiende ogen
+  rect(-7,6,5,4,'#ff8c1a'); rect(3,6,5,4,'#ff8c1a');
+  rect(-6,7,2,2,'#fff'); rect(4,7,2,2,'#fff');
+  cx.restore();
+}
+function tekenOma(sx, sy){
+  rect(sx+2,sy+14,24,32,'#3a8a8a');
+  rect(sx+6,sy+2,16,14,'#f0cda2');
+  rect(sx+4,sy-2,20,6,'#cfcfcf');
+  rect(sx+10,sy-6,8,6,'#cfcfcf');
+  rect(sx+10,sy+7,2,3,'#241509'); rect(sx+16,sy+7,2,3,'#241509');
+  rect(sx+8,sy+11,12,2,'#c08080');
+}
+function tekenGevangene(g, sx, sy){
+  rect(sx+2,sy+12,16,26,'#c0a878');
+  rect(sx+4,sy,12,12,'#f0cda2');
+  rect(sx+6,sy+4,2,3,'#241509'); rect(sx+12,sy+4,2,3,'#241509');
+}
+function tekenItem(it){
+  const sx = it.x-game.camX, sy = it.y-game.camY;
+  const zweef = Math.sin(game.tijd*3+it.x)*3;
+  if(it.type==='munt'){
+    cx.fillStyle='#ffd700';
+    cx.beginPath(); cx.ellipse(sx+8,sy+8+zweef,8,8,0,0,7); cx.fill();
+    cx.fillStyle='#c8a000';
+    tekst('m', sx+8, sy+13+zweef, 11, '#a07800', 'center', true);
+  } else if(it.type==='levens'){
+    rect(sx,sy+4+zweef,20,14,'#e8e8e8');
+    rect(sx+2,sy+6+zweef,16,10,'#9f9');
+    rect(sx+8,sy+zweef,4,5,'#c66');
+  } else if(it.type==='eten'){
+    rect(sx,sy+4+zweef,20,13,'#c08040');
+    rect(sx,sy+4+zweef,20,4,'#e8b060');
+    rect(sx+8,sy+4+zweef,4,13,'#8a5020');
+  } else if(it.type==='water'){
+    rect(sx+2,sy+6+zweef,12,18,'#bee6f5');
+    rect(sx+4,sy+10+zweef,8,12,'#5ab0e0');
+    rect(sx+5,sy+2+zweef,6,5,'#888');
+  } else if(it.type==='steen'){
+    cx.fillStyle='#aab';
+    cx.beginPath(); cx.ellipse(sx+9,sy+9+zweef,9,7,0,0,7); cx.fill();
+    cx.fillStyle='#dde'; cx.fillRect(sx+5,sy+5+zweef,4,3);
+  } else if(it.type==='kooi'){
+    if(it.open){
+      rect(sx,sy+it.h-6,it.w,6,'#7a5a3c');
+      rect(sx,sy,4,it.h,'#7a5a3c'); // open deur: alleen frame
+    } else {
+      rect(sx,sy,it.w,4,'#6a5a48'); rect(sx,sy+it.h-4,it.w,4,'#6a5a48');
+      for(let i=0;i<5;i++) rect(sx+2+i*8,sy,4,it.h,'#8a7a64');
+      tekenGevangene({}, sx+10, sy+12);
+      // barstjes als de kooi al geraakt is
+      if(it.hp<3){ cx.strokeStyle='#fff'; cx.lineWidth=1;
+        cx.beginPath(); cx.moveTo(sx+8,sy+8); cx.lineTo(sx+16,sy+20); cx.stroke(); }
+    }
+  } else if(it.type==='uitgang'){
+    const open = doelKlaar();
+    const gloed = open ? 0.5+Math.sin(game.tijd*4)*0.3 : 0.15;
+    cx.fillStyle = open ? `rgba(120,220,255,${gloed})` : 'rgba(120,120,120,0.4)';
+    cx.beginPath(); cx.ellipse(sx+16,sy+32,16,32,0,0,7); cx.fill();
+    cx.strokeStyle = open ? '#8df' : '#777'; cx.lineWidth=3;
+    cx.beginPath(); cx.ellipse(sx+16,sy+32,16,32,0,0,7); cx.stroke();
+    if(!open){
+      tekst('🔒', sx+16, sy+38, 18, '#fff', 'center');
+      const L = game.level;
+      let nog = '';
+      if(L.doel==='kooien') nog = 'nog '+L.kooien+' kooi'+(L.kooien===1?'':'en');
+      if(L.doel==='training') nog = 'training afmaken!';
+      tekst(nog, sx+16, sy-6, 11, '#fff', 'center');
+    }
+  } else if(it.type==='oma'){
+    tekenOma(sx, sy);
+    tekst('E', sx+12, sy-12, 12, '#fff', 'center', true);
+  }
+}
+function tekenProj(pr){
+  const sx = pr.x-game.camX, sy = pr.y-game.camY;
+  if(pr.type==='pijl'){
+    cx.save(); cx.translate(sx,sy);
+    cx.rotate(Math.atan2(pr.vy,pr.vx));
+    rect(-7,-1,14,2, pr.vriend?'#dcb':'#aab');
+    cx.fillStyle='#888'; cx.beginPath(); cx.moveTo(7,-3); cx.lineTo(12,0); cx.lineTo(7,3); cx.fill();
+    cx.restore();
+  } else if(pr.type==='steen'){
+    cx.fillStyle='#889'; cx.beginPath(); cx.ellipse(sx+6,sy+6,7,6,0,0,7); cx.fill();
+  } else if(pr.type==='golf'){
+    cx.fillStyle='rgba(90,180,240,0.8)';
+    cx.beginPath();
+    cx.ellipse(sx+13,sy+15,13,15,0,0,7); cx.fill();
+    cx.fillStyle='rgba(200,235,255,0.9)';
+    cx.beginPath(); cx.ellipse(sx+13,sy+6,9,5,0,0,7); cx.fill();
+  } else if(pr.type==='orb'){
+    const gl = 0.6+Math.sin(game.tijd*8)*0.3;
+    cx.fillStyle=`rgba(150,60,220,${gl})`;
+    cx.beginPath(); cx.ellipse(sx+8,sy+8,9,9,0,0,7); cx.fill();
+    cx.fillStyle='#d9f'; cx.beginPath(); cx.ellipse(sx+8,sy+8,4,4,0,0,7); cx.fill();
+  }
+}
+
+/* ---------------- HUD ---------------- */
+function balk(x,y,w,h,frac,kleurV,kleurA,label){
+  const r = Math.min(h/2,7);
+  rrect(x,y,w,h,r,'rgba(0,0,0,0.45)');
+  const fw = (w-4)*clamp(frac,0,1);
+  if(fw>2){
+    cx.save(); rpath(x+2,y+2,fw,h-4,Math.max(2,r-2)); cx.clip();
+    const g=cx.createLinearGradient(0,y,0,y+h);
+    g.addColorStop(0, kleurV); g.addColorStop(1, 'rgba(0,0,0,0.25)');
+    cx.fillStyle=g; cx.fillRect(x,y,fw+4,h);
+    cx.fillStyle='rgba(255,255,255,0.25)'; cx.fillRect(x+2,y+2,fw,Math.max(2,(h-4)/2));
+    cx.restore();
+  }
+  rrect(x,y,w,h,r,null,kleurA||'rgba(255,255,255,0.25)',1);
+  if(label){ cx.fillStyle='rgba(0,0,0,0.5)'; cx.font='bold 10px "Trebuchet MS",Verdana';
+    cx.textAlign='center'; cx.fillText(label,x+w/2+1,y+h-2.5);
+    cx.fillStyle='#fff'; cx.fillText(label,x+w/2,y+h-3.5); cx.textAlign='left'; }
+}
+function ikoonEten(x,y){ // rijstbal
+  cx.fillStyle='#f4f1e6'; cx.beginPath(); cx.moveTo(x,y-9); cx.lineTo(x+8,y+7); cx.lineTo(x-8,y+7); cx.closePath(); cx.fill();
+  cx.fillStyle='#2c3a24'; rect(x-5,y+1,10,5,'#2c3a24');
+}
+function ikoonWater(x,y){ rect(x-4,y-9,8,16,'#bfe6f5'); rect(x-3,y-4,6,10,'#5ab0e0'); rect(x-2,y-12,4,4,'#999'); }
+function ikoonKruis(x,y){ rect(x-2,y-8,4,16,'#7ee07e'); rect(x-8,y-2,16,4,'#7ee07e'); }
+function chip(x,y,w,h,actief,fn){
+  rrect(x,y,w,h,9,'rgba(14,20,32,0.62)', actief?'rgba(180,220,255,0.6)':'rgba(255,255,255,0.14)',1.5);
+  if(fn) hudButtons.push({x,y,w,h,fn});
+}
+function tekenHud(){
+  hudButtons = [];
+  const p = game.player, L = game.level;
+  const fase = FLOW[game.flowIdx];
+  const inRide = fase && fase.type==='ride';
+  const c = CHARS[p.charKey];
+
+  // ---- linksboven: HP / honger / levens ----
+  rrect(8,8,212,68,12,'rgba(10,16,28,0.55)');
+  balk(16,14,184,16, p.hp/p.maxHp, p.hp>p.maxHp*0.3?'#5ec56a':'#e85a5a', 'rgba(255,255,255,0.25)',
+       'HP '+Math.ceil(p.hp)+'/'+p.maxHp);
+  balk(16,34,184,14, p.honger/100, p.honger>30?'#e8a830':'#e85a5a', 'rgba(255,255,255,0.25)',
+       'Honger '+Math.ceil(p.honger));
+  for(let i=0;i<Math.min(p.levens,6);i++){
+    const hx=16+i*16, hy=56; cx.fillStyle='#ee5a6a';
+    cx.beginPath(); cx.ellipse(hx+4,hy+3,4,4,0,0,7); cx.ellipse(hx+10,hy+3,4,4,0,0,7); cx.fill();
+    cx.beginPath(); cx.moveTo(hx-1,hy+5); cx.lineTo(hx+7,hy+13); cx.lineTo(hx+15,hy+5); cx.fill();
+  }
+  // ---- midden: levelnaam + doel ----
+  if(L && fase && fase.type==='level'){
+    let doel = L.doelTekst;
+    if(L.doel==='kooien') doel += ' ('+(3-L.kooien)+'/3)';
+    if(L.doel==='training') doel = 'Stenen: '+(3-L.stenen)+'/3 · Poppen: '+(2-L.poppen)+'/2';
+    tekst(L.naam, W/2, 24, 14, '#eaf4ff', 'center', true);
+    tekst(doel, W/2, 42, 11, '#cfe0f0', 'center');
+  } else if(inRide){
+    tekst('Naar Akuma’s huis', W/2, 24, 14, '#eaf4ff', 'center', true);
+  }
+  // ---- rechtsboven: mun / score / xp + pauze ----
+  rrect(W-228,8,176,60,12,'rgba(10,16,28,0.55)');
+  tekst('Mun '+p.mun, W-62, 26, 14, '#ffd95a', 'right', true);
+  tekst('Score '+p.score, W-62, 44, 12, '#dfeaf5', 'right');
+  balk(W-220,52,158,11, p.xp/xpNodig(p), '#8a9cf5', 'rgba(255,255,255,0.2)', 'Niv '+p.niveau);
+  // pauzeknop
+  chip(W-46,12,36,36,false,()=>{ game.state='pause'; });
+  rect(W-36,20,5,20,'#dfeaf5'); rect(W-26,20,5,20,'#dfeaf5');
+
+  // ---- linksonder: inventaris (tikbaar) ----
+  const iy=H-50, iw=70, ih=40;
+  chip(12,iy,iw,ih, p.inv.eten>0, ()=>eet()); ikoonEten(34,iy+20);
+  tekst('×'+p.inv.eten, 48,iy+26,15,'#fff',null,true);
+  chip(12+iw+6,iy,iw,ih, p.inv.water>0, ()=>drink()); ikoonWater(12+iw+6+22,iy+20);
+  tekst('×'+p.inv.water, 12+iw+6+38,iy+26,15,'#fff',null,true);
+  chip(12+(iw+6)*2,iy,iw,ih, p.inv.levens>0, ()=>gebruikLevensmiddel()); ikoonKruis(12+(iw+6)*2+22,iy+20);
+  tekst('×'+p.inv.levens, 12+(iw+6)*2+38,iy+26,15,'#fff',null,true);
+  if(!isTouch) tekst('toetsen 1 · 2 · 3', 16, H-56, 10, '#9fb4c8');
+
+  if(!inRide){
+    // ---- rechtsonder: wapen-chip + gave-orb ----
+    const w1 = WAPENS[p.wapens[p.wapenIdx]];
+    const wx=W-220, wy=H-50, ww=118, wh=40;
+    chip(wx,wy,ww,wh, true, ()=>{ p.wapenIdx=(p.wapenIdx+1)%p.wapens.length;
+      floater(p.x+p.w/2,p.y-14,WAPENS[p.wapens[p.wapenIdx]].naam,'#fff'); });
+    tekst(w1.naam, wx+ww/2, wy+17, 12, '#ffe', 'center', true);
+    tekst(isTouch?'tik = wisselen':'[C] wisselen', wx+ww/2, wy+32, 10, '#9fb4c8', 'center');
+    // gave-orb met cooldown-ring
+    const gx=W-52, gy=H-30, gr=30, klaar=p.gaveCd<=0;
+    if(klaar) glow(gx,gy,gr+10, 'rgba(120,210,255,'+(0.25+0.15*Math.sin(game.tijd*6))+')');
+    cx.lineWidth=5; cx.strokeStyle='rgba(255,255,255,0.15)';
+    cx.beginPath(); cx.arc(gx,gy,gr,0,7); cx.stroke();
+    const frac = klaar?1:clamp(1 - p.gaveCd/c.gaveCd,0,1);
+    cx.strokeStyle = klaar?'#7ee0a0':'#8ac0ff';
+    cx.beginPath(); cx.arc(gx,gy,gr,-Math.PI/2,-Math.PI/2+frac*6.283); cx.stroke();
+    rrect(gx-gr+5,gy-gr+5,(gr-5)*2,(gr-5)*2,gr-5, klaar?'rgba(40,80,70,0.85)':'rgba(30,40,60,0.85)');
+    tekst('✦', gx, gy-2, 22, klaar?'#bfffd6':'#7e92b0', 'center', true);
+    tekst(c.gave, gx, gy+16, 9, klaar?'#bfffd6':'#8aa0bc', 'center', true);
+    hudButtons.push({x:gx-gr,y:gy-gr,w:gr*2,h:gr*2,fn:()=>gebruikGave()});
+  } else {
+    tekst(isTouch?'Veeg omhoog = springen':'Spatie = springen', W-150, H-30, 13, '#dfeaf5', 'center', true);
+  }
+
+  // ---- bazenbalk ----
+  if(game.boss && !game.boss.dood){
+    rrect(W/2-224,84,448,26,8,'rgba(10,6,18,0.6)');
+    glow(W/2,97,160,'rgba(150,60,240,0.15)');
+    balk(W/2-218,88,436,18, game.boss.hp/game.boss.maxHp, '#9a3af0', '#d9b6ff',
+      '☠ AKUMA — '+Math.max(0,Math.ceil(game.boss.hp))+' HP');
+  }
+}
+function tekenFloaters(){
+  for(const fl of game.floaters){
+    cx.globalAlpha = Math.min(1, fl.t);
+    tekst(fl.tekst, fl.x-game.camX, fl.y-game.camY, 13, fl.kleur, 'center', true);
+    cx.globalAlpha = 1;
+  }
+}
+function tekenParts(){
+  for(const pa of game.parts){
+    cx.globalAlpha = Math.max(0,Math.min(1,pa.life*2));
+    if(pa.ster){
+      cx.fillStyle = pa.kleur;
+      const x=pa.x-game.camX, y=pa.y-game.camY, s=pa.size;
+      cx.beginPath();
+      cx.moveTo(x,y-s); cx.lineTo(x+s*0.4,y-s*0.3); cx.lineTo(x+s,y);
+      cx.lineTo(x+s*0.4,y+s*0.3); cx.lineTo(x,y+s); cx.lineTo(x-s*0.4,y+s*0.3);
+      cx.lineTo(x-s,y); cx.lineTo(x-s*0.4,y-s*0.3); cx.fill();
+    } else {
+      rect(pa.x-game.camX, pa.y-game.camY, pa.size, pa.size, pa.kleur);
+    }
+    cx.globalAlpha = 1;
+  }
+}
+
+/* ---------------- Donkere grot ---------------- */
+const darkCv = document.createElement('canvas');
+darkCv.width = W; darkCv.height = H;
+const darkCx = darkCv.getContext('2d');
+function tekenDonker(){
+  const p = game.player;
+  darkCx.clearRect(0,0,W,H);
+  darkCx.fillStyle = 'rgba(4,2,12,0.82)';
+  darkCx.fillRect(0,0,W,H);
+  const sx = p.x+p.w/2-game.camX, sy = p.y+p.h/2-game.camY;
+  const gr = darkCx.createRadialGradient(sx,sy,40,sx,sy,230);
+  gr.addColorStop(0,'rgba(0,0,0,1)');
+  gr.addColorStop(1,'rgba(0,0,0,0)');
+  darkCx.globalCompositeOperation = 'destination-out';
+  darkCx.fillStyle = gr;
+  darkCx.fillRect(0,0,W,H);
+  darkCx.globalCompositeOperation = 'source-over';
+  cx.drawImage(darkCv,0,0);
+}
+
+/* ---------------- Speelveld tekenen ---------------- */
+function tekenSpel(){
+  const sh = game.shake||0;
+  const ox = sh? (Math.random()*2-1)*sh : 0, oy = sh? (Math.random()*2-1)*sh : 0;
+  cx.save(); cx.translate(ox,oy);
+  tekenLucht(game.level.theme);
+  tekenTegels();
+  for(const tr of game.traps){
+    rect(tr.x-game.camX, tr.y-game.camY+4, tr.w, 6, '#9d6');
+    rect(tr.x-game.camX+4, tr.y-game.camY, 4, 6, '#7a5');
+    rect(tr.x-game.camX+18, tr.y-game.camY, 4, 6, '#7a5');
+  }
+  for(const it of game.items) if(!it.gepakt) tekenItem(it);
+  for(const gv of game.gevangenen) tekenGevangene(gv, gv.x-game.camX, gv.y-game.camY);
+  for(const e of game.enemies) if(!e.dood) tekenVijand(e, e.x-game.camX, e.y-game.camY);
+  if(game.boss) tekenBaas(game.boss, game.boss.x-game.camX, game.boss.y-game.camY);
+  tekenHeld(game.player, game.player.x-game.camX, game.player.y-game.camY);
+  for(const pr of game.projs) tekenProj(pr);
+  tekenParts();
+  tekenFloaters();
+  if(game.level.theme==='grot') tekenDonker();
+  cx.restore();
+  tekenSfeer(game.level.theme);
+  tekenVignet(game.level.theme==='grot'?0.55:0.85);
+  tekenHud();
+  if(isTouch) tekenTouchOverlay();
+}
+
+/* ---------------- Touch-overlay (joystick + gebaren) ---------------- */
+function tekenTouchOverlay(){
+  for(const r of T.ripples){
+    const a = clamp(r.t/0.45,0,1);
+    cx.globalAlpha = a*0.75;
+    cx.strokeStyle = r.kind==='gave'?'#9be0ff':(r.kind==='jump'?'#bfffd6':'#ffffff');
+    cx.lineWidth=3;
+    cx.beginPath(); cx.arc(r.x, r.y, (1-a)*32+8, 0, 7); cx.stroke();
+    if(r.kind==='jump'){
+      cx.beginPath(); cx.moveTo(r.x,r.y+8); cx.lineTo(r.x,r.y-12);
+      cx.moveTo(r.x-6,r.y-4); cx.lineTo(r.x,r.y-13); cx.lineTo(r.x+6,r.y-4); cx.stroke();
+    }
+    cx.globalAlpha=1;
+  }
+  if(T.active){
+    cx.globalAlpha=0.55;
+    cx.fillStyle='rgba(255,255,255,0.10)'; cx.beginPath(); cx.arc(T.baseX,T.baseY,46,0,7); cx.fill();
+    cx.strokeStyle='rgba(220,240,255,0.6)'; cx.lineWidth=3; cx.beginPath(); cx.arc(T.baseX,T.baseY,46,0,7); cx.stroke();
+    const kx=clamp(T.curX,T.baseX-42,T.baseX+42), ky=clamp(T.curY,T.baseY-42,T.baseY+42);
+    glow(kx,ky,26,'rgba(150,210,255,0.35)');
+    cx.fillStyle='rgba(195,228,255,0.85)'; cx.beginPath(); cx.arc(kx,ky,20,0,7); cx.fill();
+    cx.globalAlpha=1;
+  }
+  if(!T.hintGezien){
+    cx.globalAlpha=0.55+0.2*Math.sin(game.tijd*4);
+    tekst('joystick: lopen', W*0.23, H-78, 14, '#dffaff', 'center', true);
+    tekst('tik = aanval   veeg ↑ = springen   veeg ↓ = gave', W*0.72, H-78, 13, '#dffaff', 'center', true);
+    cx.globalAlpha=1;
+  }
+}
+
+/* ---------------- Paardrit tekenen ---------------- */
+function tekenRit(){
+  const r = game.ride, p = game.player;
+  // lucht
+  const gr = cx.createLinearGradient(0,0,0,H);
+  gr.addColorStop(0,'#9ed8f0'); gr.addColorStop(1,'#e8f5d8');
+  cx.fillStyle=gr; cx.fillRect(0,0,W,H);
+  rect(800,50,64,64,'#ffe680');
+  // bergen ver weg
+  cx.fillStyle='#a8c0d8';
+  for(let i=0;i<5;i++){
+    const bx = ((i*420 - r.dist*0.1)%(W+500))-250;
+    cx.beginPath(); cx.moveTo(bx,460); cx.lineTo(bx+210,180); cx.lineTo(bx+420,460); cx.fill();
+  }
+  cx.fillStyle='#88b868';
+  for(let i=0;i<7;i++){
+    const hx = ((i*330 - r.dist*0.35)%(W+400))-200;
+    cx.beginPath(); cx.ellipse(hx+165,500,180,90,0,0,7); cx.fill();
+  }
+  // grond
+  rect(0,460,W,80,'#6aa84f');
+  rect(0,456,W,6,'#7ec060');
+  // bomen
+  for(let i=0;i<8;i++){
+    const tx = ((i*280+100 - r.dist*0.7)%(W+300))-150;
+    rect(tx,380,12,80,'#7a5230');
+    cx.fillStyle='#4a8a3a';
+    cx.beginPath(); cx.ellipse(tx+6,360,36,42,0,0,7); cx.fill();
+  }
+  // munten
+  for(const cn of r.coins){
+    const sx = cn.x - r.dist + 180;
+    if(sx<-30||sx>W+30||cn.gepakt) continue;
+    cx.fillStyle='#ffd700';
+    cx.beginPath(); cx.ellipse(sx,cn.y,9,9,0,0,7); cx.fill();
+  }
+  // obstakels
+  for(const o of r.obs){
+    const sx = o.x - r.dist + 180;
+    if(sx<-60||sx>W+60) continue;
+    if(o.type==='rots'){
+      cx.fillStyle='#9a8470';
+      cx.beginPath(); cx.ellipse(sx+18,442,22,20,0,0,7); cx.fill();
+    } else if(o.type==='hek'){
+      rect(sx,420,5,42,'#8a5a30'); rect(sx+30,420,5,42,'#8a5a30');
+      rect(sx-4,428,44,6,'#a87a45'); rect(sx-4,444,44,6,'#a87a45');
+    } else {
+      cx.fillStyle='#3a6e2a';
+      cx.beginPath(); cx.ellipse(sx+18,448,24,16,0,0,7); cx.fill();
+      cx.fillStyle='#e05080';
+      rect(sx+8,438,4,4,'#e05080'); rect(sx+24,442,4,4,'#e05080');
+    }
+  }
+  // finishvlag
+  const fx = r.finish - r.dist + 180;
+  if(fx<W+80){
+    rect(fx,330,6,132,'#ccc');
+    cx.fillStyle='#e04040';
+    cx.beginPath(); cx.moveTo(fx+6,330); cx.lineTo(fx+58,345); cx.lineTo(fx+6,362); cx.fill();
+  }
+  // paard + ruiter
+  const hx = 180, hy = 420 - 36 + r.y;
+  const been = Math.sin(r.animT*16)*8;
+  cx.save();
+  cx.translate(hx,hy);
+  cx.fillStyle = r.inv>0 && Math.floor(game.tijd*12)%2===0 ? '#caa' : '#8a5a30';
+  // benen
+  rect(8,28,6,22+been,cx.fillStyle); rect(22,28,6,22-been,cx.fillStyle);
+  rect(44,28,6,22-been,cx.fillStyle); rect(56,28,6,22+been,cx.fillStyle);
+  // lijf
+  rect(2,8,66,26,cx.fillStyle);
+  // hals & hoofd
+  rect(58,-12,12,24,cx.fillStyle);
+  rect(60,-20,20,14,cx.fillStyle);
+  rect(74,-16,3,3,'#241509');
+  // manen & staart
+  rect(56,-16,5,22,'#4a2a10');
+  cx.strokeStyle='#4a2a10'; cx.lineWidth=4;
+  cx.beginPath(); cx.moveTo(2,12); cx.quadraticCurveTo(-12,22,-8,40); cx.stroke();
+  cx.restore();
+  // ruiter (gekozen heldin) bovenop
+  const fake = Object.assign({}, p, {x:0, y:0, vx:0, vy:0, onGround:true, loopT:0, atkAnim:0, invuln:0});
+  const oudCamX = game.camX, oudCamY = game.camY;
+  game.camX=0; game.camY=0;
+  tekenHeld(fake, hx+18, hy-40);
+  game.camX=oudCamX; game.camY=oudCamY;
+  // stofwolkje bij de hoeven
+  if(r.onG && Math.floor(game.tijd*16)%2===0){
+    cx.globalAlpha=0.4; cx.fillStyle='#cdbb9a';
+    cx.beginPath(); cx.arc(140+Math.sin(game.tijd*10)*4, 470, 6+Math.random()*4, 0, 7); cx.fill();
+    cx.globalAlpha=1;
+  }
+  tekenSfeer('dorp');
+  // voortgang
+  balk(W/2-200, 72, 400, 14, r.dist/r.finish, '#b88048', 'rgba(255,255,255,0.3)', 'Naar Akuma’s huis...');
+  tekenFloaters();
+  tekenParts();
+  tekenVignet(0.7);
+  tekenHud();
+}
+
+/* ---------------- Verhaalkunst ---------------- */
+function tekenVerhaalKunst(art){
+  cx.save();
+  cx.beginPath(); cx.rect(180,60,600,210); cx.clip();
+  if(art==='rivier'){
+    const gr=cx.createLinearGradient(0,60,0,270);
+    gr.addColorStop(0,'#2a3a5e'); gr.addColorStop(1,'#4a6a8e');
+    cx.fillStyle=gr; cx.fillRect(180,60,600,210);
+    cx.fillStyle='#1a2438';
+    cx.beginPath(); cx.moveTo(180,200); cx.lineTo(330,90); cx.lineTo(470,200); cx.fill();
+    cx.beginPath(); cx.moveTo(450,200); cx.lineTo(620,80); cx.lineTo(780,200); cx.fill();
+    rect(180,200,600,70,'#3a6a9e');
+    cx.fillStyle='rgba(200,230,255,0.5)';
+    for(let i=0;i<8;i++) rect(200+i*70, 215+(i%3)*14, 40, 3, 'rgba(200,230,255,0.5)');
+    // mandje met baby
+    rect(440,196,56,20,'#a87a45'); rect(444,200,48,12,'#c89a66');
+    cx.fillStyle='#f0cda2'; cx.beginPath(); cx.ellipse(468,198,9,9,0,0,7); cx.fill();
+    rect(462,190,12,5,'#241509');
+    rect(560,90,30,30,'#f5f0d8'); // maan
+  } else if(art==='dorp'){
+    const gr=cx.createLinearGradient(0,60,0,270);
+    gr.addColorStop(0,'#aee3f5'); gr.addColorStop(1,'#d8eec8');
+    cx.fillStyle=gr; cx.fillRect(180,60,600,210);
+    cx.fillStyle='#9ccc7a';
+    cx.beginPath(); cx.ellipse(330,290,220,90,0,0,7); cx.fill();
+    cx.beginPath(); cx.ellipse(640,295,230,95,0,0,7); cx.fill();
+    for(let i=0;i<3;i++){
+      const hx=260+i*160;
+      rect(hx,180,80,60,'#c8a878');
+      cx.fillStyle='#8a4a3a';
+      cx.beginPath(); cx.moveTo(hx-10,180); cx.lineTo(hx+40,148); cx.lineTo(hx+90,180); cx.fill();
+      rect(hx+30,205,20,35,'#5a3a2a');
+    }
+    rect(690,80,50,50,'#ffe680');
+  } else if(art==='eiland'){
+    const gr=cx.createLinearGradient(0,60,0,270);
+    gr.addColorStop(0,'#8ed4f0'); gr.addColorStop(1,'#5ab0e0');
+    cx.fillStyle=gr; cx.fillRect(180,60,600,210);
+    rect(180,210,600,60,'#3a8ac0');
+    cx.fillStyle='#7ab86a';
+    cx.beginPath(); cx.ellipse(480,225,200,55,0,0,7); cx.fill();
+    rect(420,150,120,60,'#6a5a48');
+    for(let i=0;i<6;i++) rect(428+i*18,150,6,60,'#8a7a64');
+    rect(300,160,14,50,'#7a5230');
+    cx.fillStyle='#4a8a3a'; cx.beginPath(); cx.ellipse(307,148,34,30,0,0,7); cx.fill();
+  } else if(art==='paard'){
+    const gr=cx.createLinearGradient(0,60,0,270);
+    gr.addColorStop(0,'#9ed8f0'); gr.addColorStop(1,'#e8f5d8');
+    cx.fillStyle=gr; cx.fillRect(180,60,600,210);
+    rect(180,230,600,40,'#6aa84f');
+    cx.fillStyle='#8a5a30';
+    rect(400,190,90,32,'#8a5a30');
+    rect(410,222,8,26,'#8a5a30'); rect(470,222,8,26,'#8a5a30');
+    rect(478,168,14,30,'#8a5a30'); rect(482,160,26,16,'#8a5a30');
+    rect(430,164,18,30,'#c43030'); // ruiter
+    rect(433,152,12,12,'#f0cda2');
+    rect(660,80,46,46,'#ffe680');
+  } else if(art==='grot'){
+    cx.fillStyle='#16121e'; cx.fillRect(180,60,600,210);
+    cx.fillStyle='#2e2440';
+    for(let i=0;i<9;i++){
+      const sx=200+i*64;
+      cx.beginPath(); cx.moveTo(sx,60); cx.lineTo(sx+26,60); cx.lineTo(sx+13,110+(i%3)*22); cx.fill();
+    }
+    rect(180,230,600,40,'#241c30');
+    rect(380,140,10,20,'#7a5af0'); rect(390,130,8,30,'#9a7af5');
+    rect(580,150,10,18,'#7a5af0');
+    // fakkellicht
+    const gl = cx.createRadialGradient(480,200,10,480,200,120);
+    gl.addColorStop(0,'rgba(255,180,80,0.55)'); gl.addColorStop(1,'rgba(255,180,80,0)');
+    cx.fillStyle=gl; cx.fillRect(180,60,600,210);
+    rect(474,180,6,40,'#6a4a2a'); rect(470,168,14,16,'#ffb030');
+  } else if(art==='paleis'){
+    const gr=cx.createLinearGradient(0,60,0,270);
+    gr.addColorStop(0,'#e8865a'); gr.addColorStop(1,'#f5c06a');
+    cx.fillStyle=gr; cx.fillRect(180,60,600,210);
+    rect(300,90,46,46,'#ffb060');
+    cx.fillStyle='#4a2a30';
+    rect(420,160,240,110,'#4a2a30');
+    cx.beginPath(); cx.moveTo(400,160); cx.lineTo(540,108); cx.lineTo(680,160); cx.fill();
+    rect(460,200,30,70,'#2a1418'); rect(590,200,30,70,'#2a1418');
+    rect(180,250,600,20,'#7a4a3a');
+  }
+  cx.restore();
+  cx.strokeStyle='#8af'; cx.lineWidth=2; cx.strokeRect(180,60,600,210);
+}
+
+/* ---------------- Schermen ---------------- */
+function tekenTitel(){
+  uiButtons = [];
+  const gr = cx.createLinearGradient(0,0,0,H);
+  gr.addColorStop(0,'#16264e'); gr.addColorStop(0.55,'#2f5e8e'); gr.addColorStop(1,'#5a9ec0');
+  cx.fillStyle=gr; cx.fillRect(0,0,W,H);
+  // maan + halo
+  glow(150,110,120,'rgba(255,245,210,0.4)');
+  cx.fillStyle='#f5f0d8'; cx.beginPath(); cx.arc(150,110,34,0,7); cx.fill();
+  cx.fillStyle='rgba(0,0,0,0.05)'; cx.beginPath(); cx.arc(162,102,30,0,7); cx.fill();
+  // verre heuvels
+  cx.fillStyle='#244a5e';
+  for(let i=0;i<5;i++){ const hx=i*240-60;
+    cx.beginPath(); cx.ellipse(hx+120,470,200,150,0,Math.PI,0); cx.fill(); }
+  // heuveltje waar de meiden op staan
+  cx.fillStyle='#2f6a5a'; cx.beginPath(); cx.ellipse(W/2,520,360,120,0,Math.PI,0); cx.fill();
+  // water onderaan met spiegeling
+  const wg=cx.createLinearGradient(0,452,0,H); wg.addColorStop(0,'rgba(120,200,235,0.6)'); wg.addColorStop(1,'rgba(40,120,180,0.8)');
+  cx.fillStyle=wg; cx.fillRect(0,452,W,H-452);
+  for(let i=0;i<12;i++){ const golf=Math.sin(game.tijd*2+i)*4;
+    rect(i*86, 470+golf+(i%3)*16, 54, 3, 'rgba(220,245,255,0.5)'); }
+  tekenSfeer('dorp');
+  // titel met gloed
+  glow(W/2,118,200,'rgba(150,210,255,0.22)');
+  tekst('RINMI', W/2, 124, 70, '#dff2ff', 'center', true);
+  tekst('~ De Kalme Oceaan ~', W/2, 162, 22, '#ffe', 'center', true);
+  tekst('naar het boek "Dochters van de stilte" van Victoria Vermoolen', W/2, 188, 12, '#bcd', 'center');
+  // de vijf meiden
+  const fake = {w:22,vx:0,vy:0,onGround:true,loopT:game.tijd,atkAnim:0,invuln:0,facing:1};
+  CHARKEYS.forEach((k,i)=>{
+    const f = Object.assign({},fake,{charKey:k,h:CHARS[k].h});
+    tekenHeld(f, W/2-150+i*64, 268-(CHARS[k].h-44));
+    tekst(CHARS[k].naam, W/2-139+i*64, 282, 11, '#eaf4ff', 'center', true);
+  });
+  knop(W/2-120, 322, 240, 46, '▶  Start het avontuur', ()=>startSpel(), true);
+  knop(W/2-120, 376, 240, 36, 'Besturing', ()=>{ game.state='help'; });
+  tekst('Hoogste score: '+game.hi, W/2, 436, 14, '#ffd95a', 'center', true);
+  // roterende "wist je dat?"
+  cx.globalAlpha=0.92;
+  tekst(WISTJE[Math.floor(game.tijd/5)%WISTJE.length], W/2, 478, 12.5, '#cfe6ff', 'center');
+  cx.globalAlpha=1;
+  tekst(isTouch?'Tik om te beginnen':'Druk op Enter om te starten', W/2, 508, 12, '#9ab', 'center');
+  tekenVignet(0.8);
+  if(hit('enter')) startSpel();
+}
+function tekenHelp(){
+  uiButtons = [];
+  const g=cx.createLinearGradient(0,0,0,H); g.addColorStop(0,'#14203a'); g.addColorStop(1,'#10141f');
+  cx.fillStyle=g; cx.fillRect(0,0,W,H);
+  tekenSfeer('dorp');
+  tekst('Besturing', W/2, 56, 30, '#fff', 'center', true);
+  const regels = isTouch ? [
+    ['Joystick links','Lopen (en omhoog/omlaag voor zwemmen)'],
+    ['Veeg rechts ↑','Springen — vasthouden = zweven (Qingfei)'],
+    ['Tik rechts','Aanvallen met je wapen'],
+    ['Veeg rechts ↓','Je gave gebruiken (of de ✦-knop)'],
+    ['Joystick omlaag','Door een houten plankje naar beneden zakken'],
+    ['Wapen-knop','Tik om van wapen te wisselen'],
+    ['🍙 💧 ✚ onderin','Eten, drinken, levensmiddel'],
+    ['⏸ rechtsboven','Pauze'],
+  ] : [
+    ['← →  of  A / D','Lopen'],
+    ['↑ / W / Spatie','Springen (Qingfei: ingedrukt = zweven!)'],
+    ['↓','Door een houten plankje naar beneden zakken'],
+    ['X of J','Aanvallen met je wapen'],
+    ['C of K','Wapen wisselen'],
+    ['S of Shift','Je gave (elke heldin een andere!)'],
+    ['1 · 2 · 3','Eten · drinken · levensmiddel'],
+    ['E','Praten (bij oma)'],
+    ['Tab','Je tas en statistieken'],
+    ['P of Esc','Pauze'],
+  ];
+  rrect(160,86,W-320,360,16,'rgba(8,12,22,0.6)');
+  regels.forEach((r,i)=>{
+    tekst(r[0], W/2-30, 124+i*36, 15, '#ffd95a', 'right', true);
+    tekst(r[1], W/2-10, 124+i*36, 14, '#dde');
+  });
+  tekst('Let op je HONGER: eet op tijd, anders ga je dood van de honger!', W/2, 470, 13, '#fc6', 'center');
+  const terug = ()=>{ game.state = game.pauzeHelp ? 'pause' : 'title'; game.pauzeHelp = false; };
+  knop(W/2-80, 492, 160, 34, 'Terug', terug, true);
+  uiButtons.push({x:0,y:0,w:W,h:486,fn:terug});
+  if(hit('enter','escape')) terug();
+}
+function tekenVerhaal(){
+  uiButtons = [];
+  const g=cx.createLinearGradient(0,0,0,H); g.addColorStop(0,'#0e1626'); g.addColorStop(1,'#10131c');
+  cx.fillStyle=g; cx.fillRect(0,0,W,H);
+  const slide = game.storySlides[game.storyIdx];
+  tekenVerhaalKunst(slide.art);
+  tekenSfeer(slide.art==='grot'?'grot':(slide.art==='paleis'?'arena':'dorp'));
+  // tekstpaneel
+  rrect(120,298,W-240,184,16,'rgba(8,12,22,0.72)','rgba(140,190,255,0.25)',1.5);
+  tekst(slide.titel, W/2, 330, 26, '#bfe6ff', 'center', true);
+  slide.lines.forEach((l,i)=> tekst(l, W/2, 366+i*23, 15, '#dde', 'center'));
+  // bolletjes
+  const n=game.storySlides.length;
+  for(let i=0;i<n;i++){ cx.fillStyle = i===game.storyIdx?'#bfe6ff':'rgba(255,255,255,0.25)';
+    cx.beginPath(); cx.arc(W/2-(n-1)*8+i*16, 470, 4, 0, 7); cx.fill(); }
+  const meer = game.storyIdx < n-1;
+  knop(W/2-95, 494, 190, 36, meer?'Verder  ▸':'Begin!  ▸', volgendeSlide, true);
+  uiButtons.push({x:0,y:0,w:W,h:486,fn:volgendeSlide});  // tik overal = verder
+  tekenVignet(0.7);
+  if(hit('enter',' ')) volgendeSlide();
+}
+function volgendeSlide(){
+  if(game.storyIdx < game.storySlides.length-1) game.storyIdx++;
+  else volgendeFase();
+}
+function tekenSelect(){
+  uiButtons = [];
+  const g=cx.createLinearGradient(0,0,0,H); g.addColorStop(0,'#14203a'); g.addColorStop(1,'#161a26');
+  cx.fillStyle=g; cx.fillRect(0,0,W,H);
+  tekenSfeer('dorp');
+  tekst('Kies je heldin', W/2, 50, 28, '#fff', 'center', true);
+  tekst(isTouch?'(tik op een heldin)':'(pijltjes + Enter, of klik)', W/2, 74, 12, '#9ab', 'center');
+  CHARKEYS.forEach((k,i)=>{
+    const c = CHARS[k];
+    const px = 30+i*184, py = 100, pw = 168, ph = 320;
+    const act = i===game.selIdx;
+    rect(px,py,pw,ph, act?'#2a4a6e':'#202a3a');
+    cx.strokeStyle = act?'#9cf':'#445'; cx.lineWidth = act?3:1;
+    cx.strokeRect(px,py,pw,ph);
+    const fake = {charKey:k,w:22,h:c.h,vx:act?1:0,vy:0,onGround:true,loopT:game.tijd,atkAnim:0,invuln:0,facing:1};
+    tekenHeld(fake, px+pw/2-11, py+24);
+    tekst(c.naam, px+pw/2, py+100, 18, '#fff', 'center', true);
+    tekst('Gave: '+c.gave, px+pw/2, py+122, 12, '#9f9', 'center', true);
+    // blurb in regels van ~22 tekens
+    const woorden = (c.blurb+' '+c.gaveUitleg).split(' ');
+    let regel='', ry=py+144;
+    for(const w of woorden){
+      if((regel+' '+w).length>24){ tekst(regel, px+8, ry, 10, '#cde'); ry+=14; regel=w; }
+      else regel = regel?regel+' '+w:w;
+      if(ry>py+ph-50) break;
+    }
+    if(regel && ry<=py+ph-50) tekst(regel, px+8, ry, 10, '#cde');
+    // statpips
+    const st=c.stats;
+    tekst('Kracht '+'●'.repeat(st.kracht)+'  Vita '+'●'.repeat(st.vita)+'  Snel '+'●'.repeat(st.snel),
+      px+pw/2, py+ph-16, 10, '#ffd700', 'center');
+    uiButtons.push({x:px,y:py,w:pw,h:ph,fn:()=>{ game.selIdx=i; kiesPersonage(k); }});
+  });
+  knop(W/2-110, 448, 220, 40, 'Kies '+CHARS[CHARKEYS[game.selIdx]].naam+'  ▸',
+    ()=>kiesPersonage(CHARKEYS[game.selIdx]), true);
+  tekst('Je mun, score en niveau uit de proloog neem je mee!', W/2, 516, 12, '#9ab', 'center');
+  if(hit('arrowleft','a')) game.selIdx = (game.selIdx+4)%5;
+  if(hit('arrowright','d')) game.selIdx = (game.selIdx+1)%5;
+  if(hit('enter')) kiesPersonage(CHARKEYS[game.selIdx]);
+}
+function tekenWapens(){
+  uiButtons = [];
+  const g=cx.createLinearGradient(0,0,0,H); g.addColorStop(0,'#14203a'); g.addColorStop(1,'#161a26');
+  cx.fillStyle=g; cx.fillRect(0,0,W,H);
+  tekenSfeer('dorp');
+  tekst('Kies precies TWEE wapens', W/2, 56, 26, '#fff', 'center', true);
+  tekst('Yuna heeft ze allemaal voor je gemaakt. Kies slim: één voor dichtbij, één voor veraf?', W/2, 84, 13, '#9ab', 'center');
+  WAPENKEYS.forEach((k,i)=>{
+    const wpn = WAPENS[k];
+    const px = 70+i*210, py = 120, pw = 190, ph = 240;
+    const sel = game.wapenSel.includes(k);
+    rect(px,py,pw,ph, sel?'#2a5a3e':'#202a3a');
+    cx.strokeStyle = sel?'#9f9':'#445'; cx.lineWidth = sel?3:1;
+    cx.strokeRect(px,py,pw,ph);
+    // icoon
+    cx.save(); cx.translate(px+pw/2, py+60);
+    if(k==='zwaard'){ rect(-3,-34,6,48,'#cfd6e0'); rect(-12,12,24,7,'#8a5a30'); rect(-4,19,8,14,'#6a4220'); }
+    else if(k==='boog'){ cx.strokeStyle='#8a5a30'; cx.lineWidth=5;
+      cx.beginPath(); cx.arc(0,0,30,-1.25,1.25); cx.stroke();
+      cx.strokeStyle='#ddd'; cx.lineWidth=2;
+      cx.beginPath(); cx.moveTo(9,-28); cx.lineTo(9,28); cx.stroke();
+      rect(-22,-2,40,4,'#dcb'); }
+    else if(k==='zwaaibanden'){ cx.strokeStyle='#ddd'; cx.lineWidth=4;
+      cx.beginPath(); cx.arc(-14,0,17,0,7); cx.stroke();
+      cx.beginPath(); cx.arc(16,6,17,0,7); cx.stroke();
+      rect(-16,-19,4,7,'#aab'); rect(14,-13,4,7,'#aab'); }
+    else { rect(-3,-10,6,40,'#8a5a30'); rect(-14,-26,5,20,'#8a5a30'); rect(9,-26,5,20,'#8a5a30');
+      cx.strokeStyle='#6a4220'; cx.lineWidth=3;
+      cx.beginPath(); cx.moveTo(-11,-8); cx.quadraticCurveTo(0,2,11,-8); cx.stroke();
+      cx.fillStyle='#889'; cx.beginPath(); cx.ellipse(0,-4,7,6,0,0,7); cx.fill(); }
+    cx.restore();
+    tekst(wpn.naam, px+pw/2, py+128, 16, '#fff', 'center', true);
+    tekst('Schade: '+wpn.dmg+' · Tempo: '+(wpn.cd<=0.36?'snel':wpn.cd<=0.5?'normaal':'traag'),
+      px+pw/2, py+150, 11, '#ffd700', 'center');
+    const woorden = wpn.uitleg.split(' ');
+    let regel='', ry=py+172;
+    for(const w of woorden){
+      if((regel+' '+w).length>26){ tekst(regel, px+pw/2, ry, 11, '#cde', 'center'); ry+=15; regel=w; }
+      else regel = regel?regel+' '+w:w;
+    }
+    if(regel) tekst(regel, px+pw/2, ry, 11, '#cde', 'center');
+    if(sel) tekst('✓ GEKOZEN', px+pw/2, py+ph-12, 12, '#9f9', 'center', true);
+    uiButtons.push({x:px,y:py,w:pw,h:ph,fn:()=>{
+      if(sel) game.wapenSel = game.wapenSel.filter(x=>x!==k);
+      else if(game.wapenSel.length<2) game.wapenSel.push(k);
+      else { game.wapenSel.shift(); game.wapenSel.push(k); }
+      SFX.koop();
+    }});
+  });
+  tekst('Gekozen: '+game.wapenSel.length+'/2', W/2, 396, 15, game.wapenSel.length===2?'#9f9':'#fc6', 'center', true);
+  if(game.wapenSel.length===2){
+    knop(W/2-130, 420, 260, 44, 'Begin het avontuur!  ▸', ()=>{
+      game.player.wapens = game.wapenSel.slice();
+      game.player.wapenIdx = 0;
+      volgendeFase();
+    }, true);
+    if(hit('enter')){
+      game.player.wapens = game.wapenSel.slice();
+      game.player.wapenIdx = 0;
+      volgendeFase();
+    }
+  } else {
+    tekst(isTouch?'Tik op twee wapens om ze te kiezen':'Klik op twee wapens om ze te kiezen', W/2, 444, 13, '#9ab', 'center');
+  }
+  tekst('Tip (strategie!): de boog en katapult zijn veilig op afstand, zwaard en zwaaibanden zijn sterk van dichtbij.', W/2, 506, 12, '#9ab', 'center');
+}
+const OMA_QUOTES = [
+  '"Koop wat je nodig hebt, kind. De reis is nog lang!"',
+  '"Een goede heldin vecht nooit op een lege maag."',
+  '"Levensmiddel houdt je in leven. Letterlijk, hoor."',
+  '"Vergeet je tweelingzus de groeten niet te doen!"',
+  '"Spaar voor de Wapensmid vóór de laatste strijd."',
+];
+function tekenWinkel(){
+  uiButtons = [];
+  const g=cx.createLinearGradient(0,0,0,H); g.addColorStop(0,'#2c2218'); g.addColorStop(1,'#1c1610');
+  cx.fillStyle=g; cx.fillRect(0,0,W,H);
+  tekenSfeer('arena');
+  rrect(0,418,W,122,0,'rgba(58,44,28,0.9)');
+  cx.save(); cx.translate(0,0); cx.scale(1.7,1.7); tekenOma(58, 188); cx.restore();
+  tekst('Oma’s winkeltje', W/2, 52, 28, '#ffe9c4', 'center', true);
+  tekst(OMA_QUOTES[Math.floor(game.tijd/4)%OMA_QUOTES.length], W/2, 84, 14, '#e8cda0', 'center');
+  const p = game.player;
+  tekst('Jouw mun: '+p.mun, W/2, 116, 17, '#ffd700', 'center', true);
+  WINKEL.forEach((w,i)=>{
+    const py = 144+i*52;
+    const kan = p.mun>=w.prijs;
+    rect(230,py,500,44, kan?'#33402a':'#2a2a2a');
+    cx.strokeStyle = kan?'#7a5':'#444'; cx.lineWidth=1; cx.strokeRect(230,py,500,44);
+    tekst(isTouch?'›':'['+(i+1)+']', 246, py+28, 15, '#ffd700', 'left', true);
+    tekst(w.naam, 290, py+20, 14, '#fff', 'left', true);
+    tekst(w.info, 290, py+37, 11, '#bcd');
+    tekst(w.prijs+' mun', 716, py+28, 14, kan?'#ffd700':'#777', 'right', true);
+    uiButtons.push({x:230,y:py,w:500,h:44,fn:()=>koop(i)});
+  });
+  tekst('Tas: eten ×'+p.inv.eten+' · water ×'+p.inv.water+' · levensmiddel ×'+p.inv.levens
+    +' · max HP '+p.maxHp+' · smid +'+(p.smid*10)+'%', W/2, 428, 13, '#dde', 'center');
+  knop(W/2-110, 446, 220, 40, 'Verder op reis!  ▸', ()=>volgendeFase(), true);
+  tekst('Strategie-tip: spaar voor de Wapensmid vóór de laatste strijd!', W/2, 512, 12, '#9ab', 'center');
+  for(let i=1;i<=5;i++) if(hit(''+i)) koop(i-1);
+  if(hit('enter')) volgendeFase();
+}
+function tekenLevelup(){
+  uiButtons = [];
+  // spel op de achtergrond laten zien
+  if(game.level) tekenSpel(); else rect(0,0,W,H,'#1a2030');
+  rect(0,0,W,H,'rgba(8,10,20,0.75)');
+  const p = game.player;
+  tekst('NIVEAU OMHOOG!', W/2, 150, 34, '#ffd700', 'center', true);
+  tekst('Je bent nu niveau '+p.niveau+'. Kies wat je sterker maakt:', W/2, 186, 15, '#fff', 'center');
+  const keuzes = [
+    { naam:'Kracht', info:'+15% schade met alle wapens', fn:()=>{p.stats.kracht++;} },
+    { naam:'Vitaliteit', info:'+15 max HP (en meteen +15 HP)', fn:()=>{p.stats.vita++; p.maxHp+=15; p.hp+=15;} },
+    { naam:'Snelheid', info:'+6% loopsnelheid', fn:()=>{p.stats.snel++;} },
+  ];
+  keuzes.forEach((k,i)=>{
+    const px = 170+i*220;
+    rect(px,230,200,120,'#27405e');
+    cx.strokeStyle='#9cf'; cx.lineWidth=2; cx.strokeRect(px,230,200,120);
+    tekst((isTouch?'':'['+(i+1)+'] ')+k.naam, px+100, 270, 18, '#fff', 'center', true);
+    const woorden = k.info.split(' ');
+    let regel='', ry=296;
+    for(const w of woorden){
+      if((regel+' '+w).length>24){ tekst(regel, px+100, ry, 12, '#cde', 'center'); ry+=16; regel=w; }
+      else regel = regel?regel+' '+w:w;
+    }
+    if(regel) tekst(regel, px+100, ry, 12, '#cde', 'center');
+    uiButtons.push({x:px,y:230,w:200,h:120,fn:()=>{ k.fn(); SFX.niveau(); game.state= game.ride&&FLOW[game.flowIdx].type==='ride'?'ride':'play'; }});
+  });
+  for(let i=1;i<=3;i++) if(hit(''+i)){
+    keuzes[i-1].fn(); SFX.niveau();
+    game.state = FLOW[game.flowIdx].type==='ride' ? 'ride' : 'play';
+  }
+}
+function tekenStats(){
+  uiButtons = [];
+  if(game.level) tekenSpel(); else rect(0,0,W,H,'#1a2030');
+  rect(0,0,W,H,'rgba(8,10,20,0.8)');
+  const p = game.player, c = CHARS[p.charKey];
+  rect(230,70,500,400,'#1c2840');
+  cx.strokeStyle='#9cf'; cx.lineWidth=2; cx.strokeRect(230,70,500,400);
+  tekst('Jouw tas — '+c.naam, W/2, 108, 24, '#fff', 'center', true);
+  const fake = Object.assign({},p,{x:0,y:0,vx:0,vy:0,onGround:true,loopT:game.tijd,atkAnim:0,invuln:0,facing:1});
+  const oc = game.camX, ocy = game.camY; game.camX=0; game.camY=0;
+  tekenHeld(fake, 280, 140);
+  game.camX=oc; game.camY=ocy;
+  const regels = [
+    'Niveau '+p.niveau+' · XP '+Math.floor(p.xp)+'/'+xpNodig(p),
+    'HP: '+Math.ceil(p.hp)+'/'+p.maxHp+' · Honger: '+Math.ceil(p.honger)+'/100',
+    'Kracht '+p.stats.kracht+' · Vitaliteit '+p.stats.vita+' · Snelheid '+p.stats.snel,
+    'Wapenschade: ×'+dmgMult(p).toFixed(2)+' (smid +'+(p.smid*10)+'%)',
+    '',
+    'Wapens: '+p.wapens.map(k=>WAPENS[k].naam).join(' + '),
+    'Gave [S]: '+c.gave,
+    '',
+    'Etenspakketten: '+p.inv.eten+' · Waterflessen: '+p.inv.water,
+    'Levensmiddel: '+p.inv.levens,
+    'Mun: '+p.mun+' · Score: '+p.score+' · Levens: '+p.levens,
+  ];
+  regels.forEach((r,i)=> tekst(r, 360, 150+i*26, 13, '#dde'));
+  // gave-uitleg
+  const woorden = c.gaveUitleg.split(' ');
+  let regel='', ry=440;
+  for(const w of woorden){
+    if((regel+' '+w).length>56){ tekst(regel, W/2, ry, 11, '#9f9', 'center'); ry+=15; regel=w; }
+    else regel = regel?regel+' '+w:w;
+  }
+  if(regel) tekst(regel, W/2, ry, 11, '#9f9', 'center');
+  const sluit = ()=>{ game.state='play'; keysHit={}; };
+  knop(W/2-90, 484, 180, 30, isTouch?'Sluiten ▸':'Verder spelen ▸', sluit, true);
+  uiButtons.push({x:0,y:0,w:W,h:478,fn:sluit});
+  if(hit('tab','enter','escape','i')) sluit();
+}
+function tekenDialoog(){
+  uiButtons = [];
+  tekenSpel();
+  rect(0,0,W,H,'rgba(6,8,16,0.45)');
+  // oma-portret + tekstballon
+  rrect(56,324,W-112,182,16,'rgba(10,14,26,0.94)','#7fb0e6',2);
+  tekenOma(86,360);
+  rrect(150,340,W-220,150,12,'rgba(20,28,44,0.7)');
+  game.dialog.regels.forEach((r,i)=> tekst(r, (150+(W-70))/2, 372+i*25, 14, '#ffe', 'center'));
+  const sluit = ()=>{ game.dialog=null; game.state='play'; keysHit={}; };
+  knop(W-150, 470, 120, 30, 'Oké ▸', sluit, true);
+  uiButtons.push({x:0,y:0,w:W,h:H,fn:sluit});
+  if(hit('enter','e',' ')) sluit();
+}
+function tekenPauze(){
+  uiButtons = [];
+  if(FLOW[game.flowIdx] && FLOW[game.flowIdx].type==='ride') tekenRit(); else tekenSpel();
+  rect(0,0,W,H,'rgba(8,10,20,0.7)');
+  tekst('PAUZE', W/2, 200, 40, '#fff', 'center', true);
+  knop(W/2-100, 250, 200, 40, 'Verder spelen', ()=>{ game.state = FLOW[game.flowIdx].type==='ride'?'ride':'play'; }, true);
+  knop(W/2-100, 300, 200, 36, 'Besturing', ()=>{ game.pauzeHelp = true; game.state='help'; });
+  knop(W/2-100, 346, 200, 36, 'Stoppen (naar titel)', ()=>{ game.state='title'; });
+  if(hit('p','escape','enter')) game.state = FLOW[game.flowIdx].type==='ride'?'ride':'play';
+}
+function tekenGameover(){
+  uiButtons = [];
+  const g=cx.createLinearGradient(0,0,0,H); g.addColorStop(0,'#2a1014'); g.addColorStop(1,'#120608');
+  cx.fillStyle=g; cx.fillRect(0,0,W,H);
+  tekenSfeer('arena');
+  tekst('Helaas...', W/2, 170, 42, '#e88', 'center', true);
+  tekst('Het Zwarte Leger was te sterk. Maar een heldin geeft nooit op!', W/2, 215, 15, '#dcb', 'center');
+  const p = game.player;
+  tekst('Score: '+p.score+' · Hoogste score: '+game.hi, W/2, 250, 14, '#ffd700', 'center');
+  knop(W/2-130, 290, 260, 44, 'Probeer dit level opnieuw', ()=>{
+    p.levens = 3; p.hp = p.maxHp; p.honger = 80;
+    startFase(FLOW[game.flowIdx]);
+  }, true);
+  knop(W/2-130, 346, 260, 36, 'Terug naar de titel', ()=>{ game.state='title'; });
+  if(hit('enter')){ p.levens=3; p.hp=p.maxHp; p.honger=80; startFase(FLOW[game.flowIdx]); }
+}
+function tekenVictory(){
+  uiButtons = [];
+  const gr = cx.createLinearGradient(0,0,0,H);
+  gr.addColorStop(0,'#f5c06a'); gr.addColorStop(1,'#e8865a');
+  cx.fillStyle=gr; cx.fillRect(0,0,W,H);
+  // confetti
+  for(let i=0;i<40;i++){
+    const fx = (i*53+game.tijd*40*(1+i%3))%W;
+    const fy = (i*97+game.tijd*60)%H;
+    rect(fx,fy,5,5,['#e05050','#ffd700','#50c050','#5080e0','#d050d0'][i%5]);
+  }
+  tekenSfeer('dorp');
+  rrect(W/2-340,74,680,392,18,'rgba(20,14,30,0.86)','rgba(255,215,120,0.3)',2);
+  tekst('KOREA IS BEVRIJD!', W/2, 134, 36, '#ffd700', 'center', true);
+  const p = game.player, c = CHARS[p.charKey];
+  const regels = [
+    'Akuma is gevangengenomen! De keizer bedenkt een passende straf.',
+    c.naam+' en haar vrienden hebben het rijk gered. "Nae ai!"',
+    'Rinmi wordt keizerin van Korea (al wilde ze gewoon in een dorp wonen)',
+    'en trouwt met Min-Joon — onder de kersenbloesem, op het eiland.',
+    '',
+    'Tien jaar later staat er een school in het dorp, genaamd "Rinmi",',
+    'waar de vrienden lesgeven aan een nieuwe generatie helden:',
+    'de schaduwkinderen van de tijgerklauw.',
+    '',
+    'EINDE',
+  ];
+  regels.forEach((r,i)=> tekst(r, W/2, 176+i*25, 14, '#ffe', 'center'));
+  tekst('Eindscore: '+p.score+' · Hoogste score: '+game.hi, W/2, 426, 16, '#ffd700', 'center', true);
+  knop(W/2-110, 470, 220, 40, 'Opnieuw spelen', ()=>{ game.state='title'; }, true);
+  if(hit('enter')) game.state='title';
+}
+
+/* ============================================================
+   CUTSCENES — cinematische tussenfilmpjes
+   ============================================================ */
+function hexRGB(h){ h=h.replace('#',''); if(h.length===3) h=h.split('').map(c=>c+c).join('');
+  return [parseInt(h.slice(0,2),16),parseInt(h.slice(2,4),16),parseInt(h.slice(4,6),16)]; }
+function mix(a,b,t){ t=clamp(t,0,1); const A=hexRGB(a),B=hexRGB(b);
+  return 'rgb('+Math.round(A[0]+(B[0]-A[0])*t)+','+Math.round(A[1]+(B[1]-A[1])*t)+','+Math.round(A[2]+(B[2]-A[2])*t)+')'; }
+const CUT = { rain:[], blos:[], fw:[], spark:[], seeded:'' };
+function cutSeed(key){
+  if(CUT.seeded===key) return;
+  CUT.seeded=key; CUT.rain=[]; CUT.blos=[]; CUT.fw=[]; CUT.spark=[];
+  if(key==='opening') for(let i=0;i<150;i++) CUT.rain.push({x:Math.random()*W*1.3, y:Math.random()*H, l:10+Math.random()*14, s:9+Math.random()*6});
+  if(key==='finale') for(let i=0;i<80;i++) CUT.blos.push({x:Math.random()*W, y:Math.random()*H, vx:-0.6-Math.random()*1.6, vy:0.6+Math.random()*1.5, r:Math.random()*6.28, vr:(Math.random()-0.5)*0.12, s:4+Math.random()*6});
+  if(key==='akuma') for(let i=0;i<60;i++) CUT.blos.push({x:Math.random()*W, y:Math.random()*H, vx:-0.3-Math.random()*0.9, vy:0.4+Math.random()*0.9, r:Math.random()*6.28, vr:(Math.random()-0.5)*0.08, s:3+Math.random()*4});
+}
+function ster(x,y,s,a){ cx.globalAlpha=a; cx.fillStyle='#fff'; cx.beginPath(); cx.arc(x,y,s,0,7); cx.fill(); cx.globalAlpha=1; }
+function bergen(baseY, kleur, n, seed){
+  cx.fillStyle=kleur; cx.beginPath(); cx.moveTo(0,H);
+  for(let i=0;i<=n;i++){ const x=i/n*W, h=baseY-(Math.sin(i*1.7+seed)*0.5+0.5)*130-30; cx.lineTo(x,h); }
+  cx.lineTo(W,H); cx.fill();
+}
+function regenUpdate(dt){ const f=dt*60; for(const d of CUT.rain){ d.y+=d.s*f; d.x-=d.s*0.35*f; if(d.y>H){ d.y=-10; d.x=Math.random()*W*1.3; } } }
+function regenTeken(a){ cx.strokeStyle='rgba(180,210,255,'+a+')'; cx.lineWidth=2; cx.beginPath();
+  for(const d of CUT.rain){ cx.moveTo(d.x,d.y); cx.lineTo(d.x-d.l*0.35,d.y+d.l); } cx.stroke(); }
+function flits(t, momenten){
+  let a=0; for(const m of momenten){ const d=t-m; if(d>=0 && d<0.5) a=Math.max(a,(0.5-d)/0.5*(Math.floor(d*30)%2?0.7:0.25)); }
+  if(a>0){ cx.fillStyle='rgba(232,242,255,'+a+')'; cx.fillRect(0,0,W,H); }
+  return a;
+}
+function bliksem(x, top, bot, a){
+  cx.strokeStyle='rgba(235,245,255,'+a+')'; cx.lineWidth=2.5; cx.beginPath();
+  let y=top, c=x; cx.moveTo(x,top);
+  while(y<bot){ y+=18+Math.random()*22; c+=(Math.random()-0.5)*44; cx.lineTo(c,y); } cx.stroke();
+}
+function figuur(x,y,h,kleur){ cx.fillStyle=kleur;
+  cx.beginPath(); cx.arc(x,y-h,h*0.2,0,7); cx.fill();
+  rrect(x-h*0.17,y-h*0.84,h*0.34,h*0.7,h*0.12,kleur); }
+function vuurwerk(dt){
+  const f=dt*60;
+  if(Math.random()<0.05) CUT.fw.push({x:120+Math.random()*(W-240), y:H, vy:-7.5-Math.random()*3,
+    kleur:['#ff6a6a','#ffd95a','#6affb0','#7ab8ff','#e07aff'][(Math.random()*5)|0]});
+  for(const r of CUT.fw){ r.y+=r.vy*f; r.vy+=0.12*f;
+    cx.fillStyle=r.kleur; cx.beginPath(); cx.arc(r.x,r.y,2.5,0,7); cx.fill();
+    if(r.vy>=-1){ r.knal=true; for(let i=0;i<28;i++){ const a=i/28*6.28;
+      CUT.spark.push({x:r.x,y:r.y,vx:Math.cos(a)*(2+Math.random()*2.2),vy:Math.sin(a)*(2+Math.random()*2.2),life:1+Math.random()*0.6,kleur:r.kleur}); } } }
+  CUT.fw=CUT.fw.filter(r=>!r.knal);
+  for(const s of CUT.spark){ s.life-=dt; s.x+=s.vx*f; s.y+=s.vy*f; s.vy+=0.06*f;
+    cx.globalAlpha=Math.max(0,s.life); cx.fillStyle=s.kleur; cx.beginPath(); cx.arc(s.x,s.y,2.6,0,7); cx.fill(); cx.globalAlpha=1; }
+  CUT.spark=CUT.spark.filter(s=>s.life>0);
+}
+function blosUpdate(dt){ const f=dt*60; for(const b of CUT.blos){ b.x+=b.vx*f; b.y+=b.vy*f; b.r+=b.vr*f;
+  if(b.y>H+10||b.x<-10){ b.y=-10; b.x=Math.random()*W; } } }
+function blosTeken(kleur){ cx.fillStyle=kleur; for(const b of CUT.blos){ cx.save(); cx.translate(b.x,b.y); cx.rotate(b.r);
+  cx.beginPath(); cx.moveTo(0,-b.s); cx.quadraticCurveTo(b.s,-b.s*0.3,0,b.s); cx.quadraticCurveTo(-b.s,-b.s*0.3,0,-b.s); cx.fill(); cx.restore(); } }
+function ondertitel(sub){
+  rrect(W/2-380,H-66,760,46,12,'rgba(0,0,0,0.5)');
+  tekst(sub, W/2, H-36, 16, '#fff', 'center', true);
+}
+const CUTSCENES = {
+  opening(t,dt){
+    const DUR=15.5; regenUpdate(dt);
+    const dawn=clamp((t-12.5)/3,0,1);
+    const g=cx.createLinearGradient(0,0,0,H);
+    g.addColorStop(0,mix('#0a1226','#ffd9a0',dawn)); g.addColorStop(0.6,mix('#16243e','#ffc890',dawn*0.7)); g.addColorStop(1,mix('#1e3450','#9fd0e0',dawn));
+    cx.fillStyle=g; cx.fillRect(0,0,W,H);
+    for(let i=0;i<40;i++){ const sx=(i*97)%W, sy=(i*53)%250; ster(sx,sy+18,1+(i%3)*0.5,(0.4+0.4*Math.sin(game.tijd*2+i))*(1-dawn)); }
+    const pan = t>9 ? clamp((t-9)/3.5,0,1)*260 : 0;
+    cx.save(); cx.translate(-pan*0.3,0); bergen(330,mix('#0e1a2e','#caa07a',dawn),7,1.2); cx.restore();
+    cx.save(); cx.translate(-pan*0.5,0); bergen(380,mix('#142339','#e0b48a',dawn),6,3.5); cx.restore();
+    const rg=cx.createLinearGradient(0,380,0,H); rg.addColorStop(0,mix('#1a3a5a','#8fc0d8',dawn)); rg.addColorStop(1,mix('#0e2238','#5fa0c0',dawn));
+    cx.fillStyle=rg; cx.fillRect(0,380,W,H-380);
+    cx.strokeStyle='rgba(180,220,255,0.22)'; cx.lineWidth=2;
+    for(let i=0;i<8;i++){ const ry=400+i*16; cx.beginPath(); for(let x=0;x<=W;x+=16) cx.lineTo(x,ry+Math.sin(x*0.05+game.tijd*2+i)*3); cx.stroke(); }
+    if(t<9){ const hx=200-pan*0.5; rect(hx,300,90,80,'#0c1320');
+      cx.fillStyle='#0c1320'; cx.beginPath(); cx.moveTo(hx-12,300); cx.lineTo(hx+45,262); cx.lineTo(hx+102,300); cx.fill();
+      rect(hx+34,330,22,28, mix('#3a2a14','#ffcf6a', t<4?0.3:0.65)); }
+    if(t>=4 && t<9.5){ const px=320-pan*0.5; figuur(px,372,54,'#0a1018'); figuur(px+34,372,52,'#0a1018');
+      const bx=px+18+clamp((t-6)/3,0,1)*44; rrect(bx,364,30,12,4,'#1a1206'); }
+    if(t>=8){ const bx=360+(t-8)*70-pan, by=372+Math.sin(t*3)*3;
+      rrect(bx,by-8,34,14,4,'#241a0c'); rrect(bx+4,by-6,26,8,3,'#3a2a14');
+      cx.fillStyle='#f0cda2'; cx.beginPath(); cx.arc(bx+17,by-6,5,0,7); cx.fill();
+      const gl=0.5+0.5*Math.sin(t*6); glow(bx+17,by-2,12,'rgba(255,230,160,'+(0.45*gl)+')'); ster(bx+17,by-2,2*gl,gl);
+      cx.strokeStyle='rgba(200,235,255,0.4)'; cx.lineWidth=2; cx.beginPath(); cx.arc(bx+17,by+7,10,0.2,2.9); cx.stroke(); }
+    if(dawn>0){ cx.globalAlpha=dawn; const vx=W-260;
+      for(let i=0;i<3;i++){ rect(vx+i*70,320,50,40,'#5a3a26'); cx.fillStyle='#7a4a36';
+        cx.beginPath(); cx.moveTo(vx+i*70-6,320); cx.lineTo(vx+i*70+25,300); cx.lineTo(vx+i*70+56,320); cx.fill(); }
+      figuur(vx-28,372,46,'#3a4a4a'); cx.globalAlpha=1; }
+    const ra=clamp(1-dawn,0,1)*0.5; if(ra>0.05) regenTeken(ra);
+    const fa=flits(t,[1.2,2.4,5.0,6.6,9.0]); if(fa>0.2 && t<10) bliksem(W*(0.3+0.4*Math.sin(t*9)),0,300,fa);
+    if(t>=8.6 && t<11.5){ cx.globalAlpha=clamp(11.5-t,0,1);
+      tekst('Riiiinmiiiiiii!', 320-pan*0.5+(t-8.6)*64, 296-(t-8.6)*28, 22, '#dde','center',true); cx.globalAlpha=1; }
+    ondertitel(t<5?'Tussen de bergen van Japan en de stille meren van Zuid-Korea...':
+              t<9?'"Het water zal je dragen. Je zal een heldin worden."':
+              t<12.5?'En het water droeg haar... ver, heel ver weg.':
+                     'Een oude vrouw vond het kind van het water.');
+    tekenVignet(0.5);
+    return t>=DUR;
+  },
+  akuma(t,dt){
+    const DUR=7.5; blosUpdate(dt);
+    const g=cx.createLinearGradient(0,0,0,H); g.addColorStop(0,'#3a1226'); g.addColorStop(0.6,'#2a0e1e'); g.addColorStop(1,'#160810');
+    cx.fillStyle=g; cx.fillRect(0,0,W,H);
+    glow(W*0.72,118,150,'rgba(210,40,40,0.4)'); cx.fillStyle='#c83a3a'; cx.beginPath(); cx.arc(W*0.72,118,46,0,7); cx.fill();
+    bergen(360,'#1a0c14',6,2.0);
+    const px=W/2-180; rect(px,250,360,210,'#0e0610');
+    cx.fillStyle='#0e0610'; cx.beginPath(); cx.moveTo(px-30,250); cx.lineTo(px+180,180); cx.lineTo(px+390,250); cx.fill();
+    const march=(t*32)%44;
+    for(let i=0;i<17;i++){ const sx=i*58-march, bob=Math.sin(t*6+i)*3;
+      figuur(sx,462+bob,40,'#0a040a'); cx.strokeStyle='#0a040a'; cx.lineWidth=3;
+      cx.beginPath(); cx.moveTo(sx+11,460); cx.lineTo(sx+15,418); cx.stroke(); }
+    if(t>3){ const a=clamp((t-3)/2,0,1), ax=W/2, ay=H-50-a*150; cx.save(); cx.globalAlpha=a;
+      cx.fillStyle='#2a0e3a'; rrect(ax-62,ay,124,260,22,'#2a0e3a');
+      cx.fillStyle='#3a1450'; cx.beginPath(); cx.arc(ax,ay-18,46,0,7); cx.fill();
+      cx.beginPath(); cx.moveTo(ax-40,ay-28); cx.lineTo(ax-80,ay-92); cx.lineTo(ax-16,ay-44); cx.fill();
+      cx.beginPath(); cx.moveTo(ax+40,ay-28); cx.lineTo(ax+80,ay-92); cx.lineTo(ax+16,ay-44); cx.fill();
+      glow(ax-16,ay-24,22,'rgba(255,120,30,0.85)'); glow(ax+16,ay-24,22,'rgba(255,120,30,0.85)');
+      cx.fillStyle='#ff8c1a'; cx.beginPath(); cx.arc(ax-16,ay-24,7,0,7); cx.arc(ax+16,ay-24,7,0,7); cx.fill(); cx.restore(); }
+    blosTeken('rgba(150,40,55,0.7)');
+    flits(t,[2.0,4.2,5.6]);
+    if(t>5.6){ const a=clamp((t-5.6)/0.5,0,1)*clamp(7.5-t,0,1); cx.globalAlpha=a;
+      glow(W/2,H/2,220,'rgba(120,200,255,0.22)'); tekst('Nae ai!', W/2, H/2+12, 72, '#dff','center',true); cx.globalAlpha=1; }
+    ondertitel(t<3.5?'Boven de grond wacht Akuma met zijn laatste leger...':'"Beter 1 verslagen dan 4000." De laatste strijd begint.');
+    tekenVignet(0.6);
+    return t>=DUR;
+  },
+  finale(t,dt){
+    const DUR=12.5; blosUpdate(dt);
+    const dawn=clamp((t-8)/3,0,1);
+    const g=cx.createLinearGradient(0,0,0,H); g.addColorStop(0,mix('#f3a85a','#9fd0ea',dawn)); g.addColorStop(1,mix('#e8c07a','#d8eecc',dawn));
+    cx.fillStyle=g; cx.fillRect(0,0,W,H);
+    glow(W*0.2,108,150,'rgba(255,220,150,0.5)'); cx.fillStyle='#ffe9b0'; cx.beginPath(); cx.arc(W*0.2,108,44,0,7); cx.fill();
+    bergen(382, mix('#9a7a5a','#86b88a',dawn), 6, 1.5);
+    if(t<8){
+      const px=W/2-170; rect(px,250,340,210,'#5a2e34');
+      cx.fillStyle='#5a2e34'; cx.beginPath(); cx.moveTo(px-26,250); cx.lineTo(px+170,182); cx.lineTo(px+366,250); cx.fill();
+      figuur(W/2-28,440,72,'#b06a3a'); figuur(W/2+28,440,72,'#3a5a8a'); figuur(W/2,432,80,'#7a1a2a');
+      const gl=0.6+0.4*Math.sin(t*5); glow(W/2-28,376,30,'rgba(255,220,120,'+(0.5*gl)+')');
+      cx.fillStyle='#ffd95a'; cx.beginPath(); cx.moveTo(W/2-42,378); cx.lineTo(W/2-34,366); cx.lineTo(W/2-28,376); cx.lineTo(W/2-22,366); cx.lineTo(W/2-14,378); cx.fill();
+      vuurwerk(dt);
+    } else {
+      const sx=W/2-120; cx.fillStyle=mix('#6a4a30','#7a5a40',dawn); rect(sx,300,240,150,cx.fillStyle);
+      cx.fillStyle='#8a4a3a'; cx.beginPath(); cx.moveTo(sx-20,300); cx.lineTo(sx+120,254); cx.lineTo(sx+260,300); cx.fill();
+      rrect(sx+95,360,52,90,4,'#3a2418'); tekst('RINMI', W/2, 338, 24, '#ffe','center',true);
+      for(let i=0;i<6;i++){ const kx=(i*120+t*70)%(W+80)-40; figuur(kx,442,28,['#b06a3a','#c43030','#5a7a3a','#7ab8e0','#8a7a66','#e0a050'][i]); }
+    }
+    blosTeken('rgba(255,200,225,0.88)');
+    ondertitel(t<4?'"Hierbij maak ik Rinmi keizerin en beschermer van Korea."':
+              t<8?'Korea is bevrijd! En ze trouwden onder de kersenbloesem.':
+                  'Tien jaar later: de schaduwkinderen van de tijgerklauw.');
+    tekenVignet(0.5);
+    return t>=DUR;
+  },
+};
+function startCutscene(key){ cutSeed(key); game.cut={key,t:0}; game.state='cutscene'; keysHit={}; }
+function eindCutscene(){ game.cut=null; CUT.seeded=''; volgendeFase(); }
+function tekenCutscene(dt){
+  uiButtons=[];
+  const c=game.cut; c.t+=dt;
+  const klaar = CUTSCENES[c.key](c.t, dt);
+  cx.globalAlpha=0.6+0.2*Math.sin(game.tijd*4);
+  tekst(isTouch?'tik om over te slaan':'Enter = overslaan', W-16, 28, 12, '#fff', 'right');
+  cx.globalAlpha=1;
+  uiButtons.push({x:0,y:0,w:W,h:H,fn:eindCutscene});
+  if(klaar || (c.t>0.4 && hit('enter',' '))) eindCutscene();
+}
+
+/* ---------------- Hoofdlus ---------------- */
+let vorigeTijd = performance.now();
+function lus(nu){
+  let dt = Math.min(0.033, (nu-vorigeTijd)/1000);
+  vorigeTijd = nu;
+  game.tijd += dt;
+  updateSfeer(dt);
+  // gebaar-rimpels laten vervagen
+  for(const r of T.ripples) r.t -= dt;
+  if(T.ripples.length) T.ripples = T.ripples.filter(r=>r.t>0);
+  // hitstop: bevries de simulatie heel even bij grote klappen
+  if(game.hitstop>0){ game.hitstop -= dt; dt = 0; }
+
+  switch(game.state){
+    case 'title':    tekenTitel(); break;
+    case 'help':     tekenHelp(); break;
+    case 'story':    tekenVerhaal(); break;
+    case 'select':   tekenSelect(); break;
+    case 'weapons':  tekenWapens(); break;
+    case 'shop':     tekenWinkel(); break;
+    case 'levelup':  tekenLevelup(); break;
+    case 'stats':    tekenStats(); break;
+    case 'dialog':   tekenDialoog(); break;
+    case 'pause':    tekenPauze(); break;
+    case 'gameover': tekenGameover(); break;
+    case 'victory':  tekenVictory(); break;
+    case 'cutscene': tekenCutscene(dt); break;
+    case 'play': {
+      if(hit('p','escape')){ game.state='pause'; break; }
+      updateSpeler(dt);
+      if(game.state!=='play' && game.state!=='levelup' && game.state!=='dialog' && game.state!=='stats'){
+        // overgang (dood/level klaar) — teken nog wel het juiste scherm volgende frame
+      }
+      if(game.state==='play' || game.state==='levelup' || game.state==='dialog' || game.state==='stats'){
+        for(const e of game.enemies) if(!e.dood) updateVijand(e, dt);
+        game.enemies = game.enemies.filter(e=>!e.dood);
+        if(game.boss) updateBaas(dt);
+        updateProjs(dt);
+      }
+      if(game.state==='play') tekenSpel();
+      else if(game.state==='levelup') tekenLevelup();
+      else if(game.state==='dialog') tekenDialoog();
+      else if(game.state==='stats') tekenStats();
+      break;
+    }
+    case 'ride': {
+      if(hit('p','escape')){ game.state='pause'; break; }
+      updateRit(dt);
+      updateProjs(dt); // voor floaters/deeltjes
+      if(game.state==='ride') tekenRit();
+      else if(game.state==='levelup') tekenLevelup();
+      break;
+    }
+  }
+  keysHit = {};
+  T.hits = {};
+  requestAnimationFrame(lus);
+}
+
+/* ---------------- App-icoon & manifest (voor 'Zet op beginscherm') ---------------- */
+(function(){
+  try{
+    const ic=document.createElement('canvas'); ic.width=180; ic.height=180;
+    const g=ic.getContext('2d');
+    const gr=g.createLinearGradient(0,0,0,180); gr.addColorStop(0,'#2f5e8e'); gr.addColorStop(1,'#5a9ec0');
+    g.fillStyle=gr; g.fillRect(0,0,180,180);
+    g.fillStyle='rgba(220,245,255,0.45)';
+    for(let i=0;i<3;i++){ g.beginPath(); g.ellipse(90,150+i*16,120,18,0,Math.PI,0); g.fill(); }
+    g.fillStyle='#ffd4e6';
+    for(let i=0;i<5;i++){ g.save(); g.translate(134,46); g.rotate(i/5*6.283);
+      g.beginPath(); g.ellipse(0,-12,7,12,0,0,7); g.fill(); g.restore(); }
+    g.fillStyle='#ffe08a'; g.beginPath(); g.arc(134,46,5,0,7); g.fill();
+    g.fillStyle='#fff'; g.font='bold 120px "Trebuchet MS",Verdana'; g.textAlign='center';
+    g.fillText('R',84,130);
+    const url=ic.toDataURL('image/png');
+    const add=(rel,attrs)=>{ const l=document.createElement('link'); l.rel=rel;
+      for(const k in attrs) l.setAttribute(k,attrs[k]); document.head.appendChild(l); };
+    add('apple-touch-icon',{href:url});
+    add('icon',{type:'image/png',href:url});
+    const man={ name:'Rinmi — De Kalme Oceaan', short_name:'Rinmi', display:'fullscreen',
+      orientation:'landscape', background_color:'#0a0d16', theme_color:'#0a0d16',
+      start_url:'.', icons:[{src:url,sizes:'180x180',type:'image/png'}] };
+    add('manifest',{href:URL.createObjectURL(new Blob([JSON.stringify(man)],{type:'application/manifest+json'}))});
+  }catch(e){}
+})();
+
+requestAnimationFrame(lus);
+</script>
+</body>
+</html>
