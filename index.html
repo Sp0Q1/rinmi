@@ -940,13 +940,17 @@ function updateSpeler(dt){
     if(game.boss) game.boss.dashGeraakt = false;
   }
 
+  // aan het oppervlak? (lucht net boven het hoofd) — dan kun je uit het water klauteren
+  const oppervlak = inWater && tileAtPx(p.x+p.w/2, p.y-3)!=='W';
   // zwemmen / zwaartekracht
   if(inWater && p.charKey==='rinmi'){
     p.swim = true;
-    p.vy += GRAV*0.06*f;
-    if(down('arrowup','w',' ')) p.vy -= 0.5*f;
-    if(down('arrowdown','s')) p.vy += 0.35*f;
-    p.vy = Math.max(-3.5, Math.min(3.5, p.vy))*Math.pow(0.93,f);
+    if(down('arrowup','w',' ')) p.vy -= 0.5*f;        // omhoog zwemmen
+    else if(down('arrowdown','s')) p.vy += 0.4*f;     // duiken
+    else p.vy -= 0.15*f;                              // licht drijfvermogen naar het oppervlak
+    p.vy = Math.max(-3.6, Math.min(3.2, p.vy))*Math.pow(0.92,f);
+    // bij het oppervlak: springen = uit het water klauteren op de kant
+    if(oppervlak && hit('arrowup','w',' ')){ p.vy = -10.5; SFX.spring(); }
     p.waterT += dt;
     if(p.waterT>0.4){ p.waterT=0;
       if(p.hp<p.maxHp){ p.hp=Math.min(p.maxHp,p.hp+1.5);
@@ -955,13 +959,14 @@ function updateSpeler(dt){
   } else {
     p.swim = false;
     if(inWater){
-      // andere meiden: water duwt ze omhoog en doet zeer
-      p.vy = Math.min(p.vy, 1.2); p.vy -= 0.3*f;
+      // andere meiden: water duwt ze stevig omhoog en doet een beetje zeer
+      p.vy = Math.min(p.vy, 1.0); p.vy -= 0.45*f;
       p.waterDmgT += dt;
-      if(p.waterDmgT>0.55){ p.waterDmgT=0; p.hp -= 4;
+      if(p.waterDmgT>0.75){ p.waterDmgT=0; p.hp -= 3;
         floater(p.x+p.w/2,p.y-8,'Brr!','#8cf');
         if(p.hp<=0){ sterf(); return; } }
-      if(hit('arrowup','w',' ')) p.vy = -9;
+      // uit het water springen (sterker, zodat je de kant haalt)
+      if(hit('arrowup','w',' ')) p.vy = -10.5;
     } else {
       p.vy += GRAV*f;
       if(p.coyote>0 && p.jumpBuf>0){ p.vy = JUMP; p.coyote=0; p.jumpBuf=0; SFX.spring();
@@ -971,6 +976,17 @@ function updateSpeler(dt){
         p.vy = 1.4; p.glijT += dt;
         if(Math.floor(p.glijT*10)%3===0)
           game.parts.push({x:p.x+p.w/2+(p.glijT*50%14)-7,y:p.y+p.h,vx:0,vy:1,life:0.3,kleur:'#cef',size:2});
+      }
+    }
+  }
+  // uit het water klauteren: zwem tegen een randje op gelijke hoogte aan → omhoog geduwd
+  if(inWater){
+    const dir = down('arrowleft','a') ? -1 : (down('arrowright','d') ? 1 : 0);
+    if(dir!==0){
+      const fcol = Math.floor((dir>0 ? p.x+p.w+3 : p.x-3)/TILE);
+      const footRow = Math.floor((p.y+p.h-4)/TILE);
+      if(fullSolid(tile(fcol, footRow)) && !fullSolid(tile(fcol, footRow-1)) && p.vy>-6){
+        p.vy = -6; // klauter het randje op
       }
     }
   }
